@@ -7,7 +7,7 @@
 - `POST /v1/chat/completions`: Chat API
 
 
-其中模型固定为gpt-4o-2024-08-06，不需要Bearer，支持发送图片、支持Function calling
+其中模型固定为gpt-4o-2024-08-06，不需要Bearer，支持发送图片、但不支持Function calling
 
 ## 启动说明
  `-h, --help                 Display this help message `
