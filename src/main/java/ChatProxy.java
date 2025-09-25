@@ -44,7 +44,7 @@ public class ChatProxy implements HttpHandler {
 
     static {
         EncodingRegistry reg = Encodings.newDefaultEncodingRegistry();
-        ENCODING = reg.getEncoding(EncodingType.CL100K_BASE)
+        ENCODING = reg.getEncoding(EncodingType.CL100K_BASE);
     }
 
 
@@ -84,7 +84,6 @@ public class ChatProxy implements HttpHandler {
             }
             this.token = newToken;
             this.tokenExp = exp;
-//            System.out.printf("新 Token 生效，exp=%d (UTC seconds)%n", exp);
 
         } catch (Exception e) {
             throw new RuntimeException("解析 JWT 过期时间失败", e);
@@ -140,7 +139,7 @@ public class ChatProxy implements HttpHandler {
         }
         if ("GET".equals(method)) {
             // 返回欢迎页面
-            String response = "<html><head><title>欢迎使用API</title></head><body><h1>欢迎使用API</h1><p>此 API 用于与 ChatGPT / Claude 模型交互。您可以发送消息给模型并接收响应。</p></body></html>";
+            String response = "<html><head><title>欢迎使用API</title></head><body><h1>欢迎使用API</h1><p>此 API 用于与 gpt-4o 模型交互。您可以发送消息给模型并接收响应。</p></body></html>";
 
             exchange.getResponseHeaders().add("Content-Type", "text/html; charset=utf-8");
             exchange.sendResponseHeaders(200, response.getBytes(StandardCharsets.UTF_8).length);
@@ -154,8 +153,6 @@ public class ChatProxy implements HttpHandler {
             return;
         }
 
-        /* --- POST 请求异步处理 --- */
-//        CompletableFuture.runAsync(() -> {
         try (InputStream is = exchange.getRequestBody()) {
             /* 1. 解析请求体 */
             String reqBody = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))
@@ -268,9 +265,7 @@ public class ChatProxy implements HttpHandler {
             }
 
             Request upstreamReq = buildRequest("/ai/chat/completion", token, requestJson.toString());
-//            System.out.println(requestJson.toString(4));
-//
-//                System.out.println("收到请求");
+
             /* 3. 调用上游并分流处理 */
             if (isStream) {
                 /* -- 流式返回 -- */
@@ -284,7 +279,6 @@ public class ChatProxy implements HttpHandler {
             e.printStackTrace();
             Utils.Utils.sendError(exchange, "内部服务器错误: " + e.getMessage(), 500);
         }
-//        }, executor);
     }
 
 
@@ -601,3 +595,4 @@ public class ChatProxy implements HttpHandler {
     }
 
 }
+
