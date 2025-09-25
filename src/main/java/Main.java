@@ -11,7 +11,8 @@ public class Main {
 
     public static int port = 80;
     public static String prefix = ""; // 路径前缀，默认为空
-    private static final ExecutorService executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+    private static final ExecutorService executor =
+            Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
 
     public static HttpServer createHttpServer(int initialPort) throws IOException {
         int p = initialPort;
@@ -34,20 +35,16 @@ public class Main {
      * Displays help information for the application
      */
     private static void printHelp() {
-        System.out.println("Usage: java -jar Chatrun.jar [options]");
+        System.out.println("Usage: java -jar GPT4.jar [options]");
         System.out.println("Options:");
         System.out.println("  -h, --help                 Display this help message");
         System.out.println("  -p, --port <number>        Specify the port number (default: 80)");
         System.out.println("  -c, --charset <charset>    Set output charset: UTF-8 or GBK (default depends on OS)");
-        System.out.println("  -f, --prefix <prefix>      Set API path prefix, e.g. Chatrun (default: none)");
+        System.out.println("  -f, --prefix <prefix>      Set API path prefix, e.g. GPT4 (default: none)");
         System.out.println();
         System.out.println("Supported endpoints:");
         System.out.println("  GET  /[prefix]/v1/models                  - List supported models");
         System.out.println("  POST /[prefix]/v1/chat/completions        - OpenAI Chat/completion interface");
-        System.out.println("  POST /[prefix]/v1/message                 - Claude chat/completion interface");
-//        System.out.println("  POST /[prefix]/v1/audio/speech            - Text-to-Speech interface");
-//        System.out.println("  POST /[prefix]/v1/images/generations      - Image generation interface");
-//        System.exit(0);
     }
 
     /**
@@ -61,7 +58,7 @@ public class Main {
             printHelp();
         }
         String charset = null;
-
+   
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
 
@@ -121,12 +118,11 @@ public class Main {
                 default:
                     System.err.println("Unknown option: " + arg);
                     printHelp();
-//                    System.exit(0);
             }
         }
-
+        
         if (charset != null) {
-            System.setProperty("chatrun.charset", charset);
+            System.setProperty("gpt4.charset", charset);
         }
 
         return p;
@@ -150,25 +146,25 @@ public class Main {
         } catch (ClassNotFoundException e) {
             // 类不存在，可能不是在Native Image环境
         }
-
+        
         // 方法3：检查java.vm.name是否包含"Native Image"
         String vmName = System.getProperty("java.vm.name", "").toLowerCase();
         return vmName.contains("native image");
     }
-
+    
     public static void main(String[] args) throws IOException {
         // 首先解析命令行参数，确保获取到-c参数
         int p = parseArgs(args);
-
+        
         try {
             // 获取charset系统属性（由parseArgs设置）
-            String cs = System.getProperty("chatrun.charset");
-
+            String cs = System.getProperty("gpt4.charset");
+            
             // 如果未指定charset，根据运行环境和操作系统设置默认值
             if (cs == null) {
                 boolean isWindows = System.getProperty("os.name").toLowerCase().contains("windows");
                 boolean isAot = isRunningInAot();
-
+                
                 // 在AOT编译下，Windows默认GBK，其他系统默认UTF-8
                 if (isAot) {
                     cs = isWindows ? "GBK" : "UTF-8";
@@ -178,20 +174,20 @@ public class Main {
                     cs = System.getProperty("file.encoding", isWindows ? "GBK" : "UTF-8");
                     System.out.println("Running in JVM mode, default charset: " + cs);
                 }
-
-                System.setProperty("chatrun.charset", cs);
+                
+                System.setProperty("gpt4.charset", cs);
             }
-
+            
             try {
                 java.io.OutputStream os = System.out;  // 获取 System.out 的 OutputStream
                 PrintStream ps = new PrintStream(os, true, cs);
                 System.setOut(ps);  // 设置新的 System.out 输出流
-
+                
                 // 同样应用到标准错误输出
                 java.io.OutputStream errOs = System.err;
                 PrintStream errPs = new PrintStream(errOs, true, cs);
                 System.setErr(errPs);
-
+                
                 System.out.println("Output charset set to: " + cs);
             } catch (Exception e) {
                 System.err.println("Warning: Failed to set charset to " + cs + ". Falling back to system default.");
@@ -210,19 +206,8 @@ public class Main {
         }
         System.out.println("  GET  " + prefixPath + "/models");
         System.out.println("  POST " + prefixPath + "/chat/completions");
-        System.out.println("  POST " + prefixPath + "/images/generations");
-//        System.out.println("  POST " + prefixPath + "/audio/speech");
-//        System.out.println("  POST " + prefixPath + "/message");
-//        server.createContext(prefixPath + "/v1/models", new ModelsHandler());
-//        server.createContext(prefixPath + "/v1/chat/completions", new ChatProxy());
-//        server.createContext(prefixPath + "/v1/images/generations", new ImageHandler());
         server.createContext(prefixPath + "/models", exchange -> new ModelsHandler().handle(exchange));
         server.createContext(prefixPath + "/chat/completions", exchange -> new ChatProxy().handle(exchange));
-        server.createContext(prefixPath + "/images/generations", exchange -> new ImageProxy().handle(exchange));
-        server.createContext("/v2/images/generations", exchange -> new ImageProxy().handle(exchange));
-//        server.createContext(prefixPath + "/audio/speech", exchange -> new TextToSpeechHandler().handle(exchange));
-//        server.createContext(prefixPath + "/message", exchange -> new ClaudeProxy().handle(exchange));
-
         server.setExecutor(executor);
         server.start();
     }
