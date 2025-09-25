@@ -206,9 +206,10 @@ public class Main {
         }
         System.out.println("  GET  " + prefixPath + "/models");
         System.out.println("  POST " + prefixPath + "/chat/completions");
-        server.createContext(prefixPath + "/models", exchange -> new ModelsHandler().handle(exchange));
-        server.createContext(prefixPath + "/chat/completions", exchange -> new ChatProxy().handle(exchange));
+        server.createContext(prefixPath + "/models", new ModelsHandler());
+        server.createContext(prefixPath + "/chat/completions", new ChatProxy());
         server.setExecutor(executor);
         server.start();
     }
 }
+
