@@ -84,6 +84,7 @@ public class ChatProxy implements HttpHandler {
             }
             this.token = newToken;
             this.tokenExp = exp;
+//            System.out.printf("新 Token 生效，exp=%d (UTC seconds)%n", exp);
 
         } catch (Exception e) {
             throw new RuntimeException("解析 JWT 过期时间失败", e);
@@ -139,7 +140,7 @@ public class ChatProxy implements HttpHandler {
         }
         if ("GET".equals(method)) {
             // 返回欢迎页面
-            String response = "<html><head><title>欢迎使用API</title></head><body><h1>欢迎使用API</h1><p>此 API 用于与 gpt-4o 模型交互。您可以发送消息给模型并接收响应。</p></body></html>";
+            String response = "<html><head><title>欢迎使用API</title></head><body><h1>欢迎使用API</h1><p>此 API 用于与 ChatGPT / Claude 模型交互。您可以发送消息给模型并接收响应。</p></body></html>";
 
             exchange.getResponseHeaders().add("Content-Type", "text/html; charset=utf-8");
             exchange.sendResponseHeaders(200, response.getBytes(StandardCharsets.UTF_8).length);
@@ -275,9 +276,6 @@ public class ChatProxy implements HttpHandler {
                 handleNormalResponse(exchange, upstreamReq);
             }
 
-        } catch (Exception e) {
-            e.printStackTrace();
-            Utils.Utils.sendError(exchange, "内部服务器错误: " + e.getMessage(), 500);
         }
     }
 
@@ -385,9 +383,15 @@ public class ChatProxy implements HttpHandler {
 
         try (Response upstreamResp = Utils.Client.getOkHttpClient().newCall(request).execute()) {
             if (!upstreamResp.isSuccessful()) {
-                // 返回可能存在的响应体
-                String errorBody = upstreamResp.body().string();
-                throw new IOException("上游返回错误: " + upstreamResp.code() + ", 响应体: " + errorBody);
+                // 直接返回上游响应体
+                byte[] errorBody = upstreamResp.body().bytes();
+                Headers h = exchange.getResponseHeaders();
+                h.add("Content-Type", upstreamResp.header("Content-Type", "application/json; charset=utf-8"));
+                exchange.sendResponseHeaders(upstreamResp.code(), errorBody.length);
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(errorBody);
+                }
+                return;
             }
 
             /* ---------- 响应头，用 chunked-encoding ---------- */
@@ -587,12 +591,10 @@ public class ChatProxy implements HttpHandler {
         try(Response upstreamResp = Client.getOkHttpClient().newCall(request).execute()) {
             byte[] bytes = upstreamResp.body().bytes();
             Headers h = exchange.getResponseHeaders();
-            h.add("Content-Type", "application/json; charset=utf-8");
-            exchange.sendResponseHeaders(200, bytes.length);
+            h.add("Content-Type", upstreamResp.header("Content-Type", "application/json; charset=utf-8"));
+            exchange.sendResponseHeaders(upstreamResp.code(), bytes.length);
             exchange.getResponseBody().write(bytes);
-
         }
     }
 
 }
-
