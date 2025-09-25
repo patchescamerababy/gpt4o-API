@@ -31,7 +31,6 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
 import Utils.Client;
-import static Utils.Utils.buildOpenAISSEChunk;
 import static Utils.Utils.buildRequest;
 import static Utils.Utils.downloadToDataUriWithRetry;
 import static Utils.Utils.getToken;
@@ -44,8 +43,8 @@ public class ChatProxy implements HttpHandler {
     private static final Encoding ENCODING;
 
     static {
-        EncodingRegistry reg = Encodings.newDefaultEncodingRegistry();  // 线程安全单例:contentReference[oaicite:3]{index=3}
-        ENCODING = reg.getEncoding(EncodingType.CL100K_BASE);          // 通用于 GPT-4o / GPT-4 / GPT-3.5 等:contentReference[oaicite:4]{index=4}
+        EncodingRegistry reg = Encodings.newDefaultEncodingRegistry();
+        ENCODING = reg.getEncoding(EncodingType.CL100K_BASE)
     }
 
 
@@ -416,6 +415,11 @@ public class ChatProxy implements HttpHandler {
 
             boolean doneSent = false;
             try {
+                // Send initial SSE with empty content and role
+                String initialChunk = buildInitialSSEChunk(convoId,"fp_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12));
+                writer.write(initialChunk);
+                writer.flush();
+                
                 /* ---- 逐块读取：每有任意新字节就立刻发给前端 ---- */
                 final int CHUNK_SIZE = 2048;          // 可自行调整
                 okio.Buffer buf = new okio.Buffer();
@@ -426,23 +430,20 @@ public class ChatProxy implements HttpHandler {
                     /* 把当前读到的 n 字节全部取出并转 UTF-8 字符串（保持换行符） */
                     String delta = buf.readUtf8(n);
                     System.out.print(delta);
+                    
                     // 累计 completion 内容
-                    if (needUsageChunk) completionBuf.append(delta);
-
-                    // 计算当前块的token数量
-                    int tokenCount = ENCODING.countTokens(delta);
-                    // 累计token数量（线程安全地更新）
-                    synchronized (accumulatedCompletionTokens) {
-                        accumulatedCompletionTokens[0] += tokenCount;
+                    if (needUsageChunk && completionBuf != null) {
+                        completionBuf.append(delta);
+                        // 计算当前块的token数量
+                        int tokenCount = ENCODING.countTokens(delta);
+                        // 累计token数量（线程安全地更新）
+                        synchronized (accumulatedCompletionTokens) {
+                            accumulatedCompletionTokens[0] += tokenCount;
+                        }
                     }
-                    // 这不是最后一个块
-                    boolean isLastChunk = false;
-                    // 使用累计的token数
-                    int accumulatedTokens;
-                    synchronized (accumulatedCompletionTokens) {
-                        accumulatedTokens = accumulatedCompletionTokens[0];
-                    }
-                    String sseChunk = buildOpenAISSEChunk(delta, "gpt-4o-2024-08-06", convoId, isLastChunk, tokenCount, promptTokens, accumulatedTokens);
+                    
+                    // 构建内容块SSE（不包含usage）
+                    String sseChunk = buildContentSSEChunk(delta, convoId);
                     writer.write(sseChunk);
                     writer.flush();                      // 立即推送
                 }
@@ -451,37 +452,23 @@ public class ChatProxy implements HttpHandler {
                 System.err.println("stream error: " + e.getMessage());
                 // 即使出错，也要向前端宣告结束
             } finally {
+                // 1. 发送 finish_reason: "stop" 的SSE
+                String finishChunk = buildFinishSSEChunk(convoId);
+                writer.write(finishChunk);
+                writer.flush();
+                
+                // 2. 如果需要usage，发送usage SSE
                 if (needUsageChunk && completionBuf != null) {
                     // 使用累计的token数，而不是重新计算整个内容
                     int completionTokens = accumulatedCompletionTokens[0];
                     int totalTokens = promptTokens + completionTokens;
-
-                    JSONObject usage = new JSONObject()
-                            .put("prompt_tokens", promptTokens)
-                            .put("completion_tokens", completionTokens)
-                            .put("total_tokens", totalTokens);
-                    JSONArray choices = new JSONArray()
-                            .put(new JSONObject()
-                                    .put("finish_reason", "stop")
-                                    .put("index", 0)
-
-                            );
-                    JSONObject tail = new JSONObject()
-                            .put("choices", choices)
-                            .put("usage", usage);
-
-                    writer.write("data: " + tail.toString() + "\n\n");
+                    
+                    String usageChunk = buildUsageSSEChunk(convoId, promptTokens, completionTokens, totalTokens);
+                    writer.write(usageChunk);
                     writer.flush();
                 }
 
-                // 发送最后一个块，finish_reason 为 "stop"
-                // 空内容，但标记为最后一个块，finish_reason 为 "stop"
-                int finalAccumulatedTokens;
-                synchronized (accumulatedCompletionTokens) {
-                    finalAccumulatedTokens = accumulatedCompletionTokens[0];
-                }
-                String finalChunk = buildOpenAISSEChunk("", "gpt-4o-2024-08-06", convoId, true, 0, promptTokens, finalAccumulatedTokens);
-                writer.write(finalChunk);
+                // 3. 发送 [DONE]
                 writer.write("data: [DONE]\n\n");
                 writer.flush();
                 doneSent = true;
@@ -491,14 +478,119 @@ public class ChatProxy implements HttpHandler {
         }
     }
 
+    /**
+     * 构建初始SSE块（包含空content和role）
+     */
+    private String buildInitialSSEChunk(String convoId, String system_fingerprint) {
+        JSONObject delta = new JSONObject()
+                .put("content", "")
+                .put("refusal", JSONObject.NULL)
+                .put("role", "assistant");
+        
+        JSONObject choiceObj = new JSONObject()
+                .put("index", 0)
+                .put("delta", delta)
+                .put("finish_reason", JSONObject.NULL)
+                .put("logprobs", JSONObject.NULL);
+
+        JSONObject response = new JSONObject()
+                .put("id", convoId)
+                .put("object", "chat.completion.chunk")
+                .put("created", Instant.now().getEpochSecond())
+                .put("model", "gpt-4o-2024-08-06")
+                .put("system_fingerprint", system_fingerprint)
+                .put("choices", new JSONArray().put(choiceObj))
+                .put("usage", JSONObject.NULL);
+        
+        return "data: " + response.toString() + "\n\n";
+    }
+    
+    /**
+     * 构建内容SSE块（不包含usage信息）
+     */
+    private String buildContentSSEChunk(String deltaContent, String convoId) {
+        JSONObject delta = new JSONObject();
+        if (deltaContent != null && !deltaContent.isEmpty()) {
+            delta.put("content", deltaContent);
+        }
+        // Don't include role in delta for content chunks
+        
+        JSONObject choiceObj = new JSONObject()
+                .put("index", 0)
+                .put("delta", delta)
+                .put("finish_reason", JSONObject.NULL)
+                .put("logprobs", JSONObject.NULL);
+
+        
+        JSONObject response = new JSONObject()
+                .put("id", convoId)
+                .put("object", "chat.completion.chunk")
+                .put("created", Instant.now().getEpochSecond())
+                .put("model", "gpt-4o-2024-08-06")
+                .put("system_fingerprint", "fp_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12))
+                .put("choices", new JSONArray().put(choiceObj))
+                .put("usage", JSONObject.NULL);
+        
+        return "data: " + response.toString() + "\n\n";
+    }
+    
+    /**
+     * 构建结束SSE块（finish_reason: "stop"）
+     */
+    private String buildFinishSSEChunk(String convoId) {
+        JSONObject choiceObj = new JSONObject()
+                .put("index", 0)
+                .put("delta", new JSONObject())
+                .put("finish_reason", "stop")
+                .put("logprobs", JSONObject.NULL);
+
+        JSONObject response = new JSONObject()
+                .put("id", convoId)
+                .put("object", "chat.completion.chunk")
+                .put("created", Instant.now().getEpochSecond())
+                .put("model", "gpt-4o-2024-08-06")
+                .put("system_fingerprint", "fp_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12))
+                .put("choices", new JSONArray().put(choiceObj))
+                .put("usage", JSONObject.NULL);
+        
+        return "data: " + response.toString() + "\n\n";
+    }
+    
+    /**
+     * 构建usage SSE块
+     */
+    private String buildUsageSSEChunk(String convoId, int promptTokens, int completionTokens, int totalTokens) {
+        JSONObject usage = new JSONObject()
+                .put("prompt_tokens", promptTokens)
+                .put("completion_tokens", completionTokens)
+                .put("total_tokens", totalTokens)
+                .put("prompt_tokens_details", new JSONObject()
+                        .put("audio_tokens", 0)
+                        .put("cached_tokens", 0))
+                .put("completion_tokens_details", new JSONObject()
+                        .put("accepted_prediction_tokens", 0)
+                        .put("audio_tokens", 0)
+                        .put("reasoning_tokens", 0)
+                        .put("rejected_prediction_tokens", 0));
+        
+        JSONObject response = new JSONObject()
+                .put("id", convoId)
+                .put("object", "chat.completion.chunk")
+                .put("created", Instant.now().getEpochSecond())
+                .put("model", "gpt-4o-2024-08-06")
+                .put("system_fingerprint", "fp_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12))
+                .put("choices", new JSONArray())
+                .put("usage", usage);
+        
+        return "data: " + response.toString() + "\n\n";
+    }
+
     /* =======================================================================
      *  handleNormalResponse
      *  一次性读取上游文本，转换为 OpenAI JSON 后返回
      * ======================================================================= */
     private void handleNormalResponse(HttpExchange exchange, Request request) throws IOException {
         try(Response upstreamResp = Client.getOkHttpClient().newCall(request).execute()) {
-//            String rawAnswer = ;
-//            System.out.println("rawAnswer = " + rawAnswer);
             byte[] bytes = upstreamResp.body().bytes();
             Headers h = exchange.getResponseHeaders();
             h.add("Content-Type", "application/json; charset=utf-8");
