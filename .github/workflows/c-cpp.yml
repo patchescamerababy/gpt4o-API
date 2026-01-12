@@ -319,8 +319,8 @@ jobs:
 ###############################################################################
   build-linux-arm64:
     # 使用原生 ARM64 Runner（不再交叉编译）
-    # 需要 GitHub Hosted Runner 支持：ubuntu-24.04-arm64
-    runs-on: ubuntu-24.04-arm64
+    # 需要 GitHub Hosted Runner 支持：ubuntu-24.04-arm
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
     env:
