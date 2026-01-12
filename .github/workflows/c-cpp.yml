@@ -724,7 +724,9 @@ jobs:
           wget -q https://github.com/openssl/openssl/releases/download/openssl-3.5.3/openssl-3.5.3.tar.gz
           tar -zxf openssl-3.5.3.tar.gz
           cd openssl-3.5.3
-          ./Configure linux64-riscv64 no-shared --prefix="$PREFIX" --cross-compile-prefix="${TARGET}-"
+          # NOTE: Do NOT pass --cross-compile-prefix when CC is already a prefixed cross-compiler,
+          # otherwise OpenSSL Makefile will call $(CROSS_COMPILE)$(CC) -> riscv64-linux-gnu-riscv64-linux-gnu-gcc (not found)
+          ./Configure linux64-riscv64 no-shared --prefix="$PREFIX"
           make -j"$(nproc)"
           make install_sw
           cd ..
@@ -986,7 +988,9 @@ jobs:
           wget -q https://github.com/openssl/openssl/releases/download/openssl-3.5.3/openssl-3.5.3.tar.gz
           tar -zxf openssl-3.5.3.tar.gz
           cd openssl-3.5.3
-          ./Configure linux64-mips64 no-shared --prefix="$PREFIX" --cross-compile-prefix="${TARGET}-"
+          # NOTE: Do NOT pass --cross-compile-prefix when CC is already a prefixed cross-compiler,
+          # otherwise OpenSSL Makefile will call $(CROSS_COMPILE)$(CC) -> mips64el-linux-gnuabi64-mips64el-linux-gnuabi64-gcc (not found)
+          ./Configure linux64-mips64 no-shared --prefix="$PREFIX"
           make -j"$(nproc)"
           make install_sw
           cd ..
