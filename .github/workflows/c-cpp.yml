@@ -689,12 +689,12 @@ jobs:
         run: |
           set -e
           mkdir -p deps && cd deps
-          # zstd
+          # zstd（仅安装静态库，避免把 .so 带进缓存目录，导致后续 git diff / pull --rebase 失败）
           wget -q https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
           tar -zxf zstd-1.5.7.tar.gz
           cd zstd-1.5.7
-          make -j$(nproc) CC=$CC CXX=$CXX
-          sudo make PREFIX=$PREFIX install
+          make -C lib -j$(nproc) CC=$CC CXX=$CXX libzstd.a
+          sudo make -C lib PREFIX=$PREFIX install-static install-pc install-includes
           cd ..
           # zlib
           wget -q https://zlib.net/fossils/zlib-1.3.1.tar.gz
@@ -764,18 +764,20 @@ jobs:
           set -e
           dst="$PWD/${REPO_DEPS_DIR}"
 
-          rm -rf "$dst"
-          mkdir -p "$dst"
-
-          sudo cp -R "$PREFIX/include" "$dst/include"
-          sudo cp -R "$PREFIX/lib" "$dst/lib"
-          sudo chown -R "$USER":"$USER" "$dst"
-
+          # 关键：必须先拉取远端再改工作区，否则 git pull --rebase 会因为“有未提交变更”而直接失败
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git checkout "$GITHUB_REF_NAME"
           git pull --rebase origin "$GITHUB_REF_NAME"
+
+          # 关键：先删除旧目录再重建（避免旧文件残留/合并，尤其是误带入的 .so）
+          rm -rf "$dst"
+          mkdir -p "$dst/include" "$dst/lib"
+
+          # 只拷贝 include/lib（必要文件），并确保归属正确
+          sudo cp -R "$PREFIX/include/." "$dst/include/" || true
+          sudo cp -R "$PREFIX/lib/." "$dst/lib/" || true
+          sudo chown -R "$USER":"$USER" "$dst"
 
           git add "$REPO_DEPS_DIR"
           if git diff --cached --quiet; then
