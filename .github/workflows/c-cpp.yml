@@ -743,28 +743,11 @@ jobs:
           CC=$CC ./configure --static --prefix=$PREFIX
           make -j$(nproc); sudo make install
           cd ..
-          # OpenSSL (>= 3.0.0 required by cpp-httplib when CPPHTTPLIB_OPENSSL_SUPPORT is enabled)
-          OPENSSL_VER=3.5.3
-          wget -q https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VER}/openssl-${OPENSSL_VER}.tar.gz
-          tar -zxf openssl-${OPENSSL_VER}.tar.gz
-          cd openssl-${OPENSSL_VER}
-          CC=$CC ./Configure mingw64 no-shared no-tests --prefix=$PREFIX --openssldir=$PREFIX/ssl
+          wget -q https://www.openssl.org/source/openssl-1.1.1w.tar.gz
+          tar -zxf openssl-1.1.1w.tar.gz
+          cd openssl-1.1.1w
+          CC=$CC ./Configure mingw64 no-shared --prefix=$PREFIX
           make -j$(nproc); sudo make install_sw
-
-          # 有些环境会把库装到 lib64/；兜底创建并展示实际产物位置
-          sudo mkdir -p "$PREFIX/lib" "$PREFIX/lib64"
-          echo "OpenSSL installed libs:"
-          find "$PREFIX" -maxdepth 3 -type f \( -name "libssl*.a" -o -name "libcrypto*.a" \) -print || true
-
-          # 强校验：不满足就立刻失败（避免最后链接阶段才报 cannot find -lssl/-lcrypto）
-          if [ ! -f "$PREFIX/lib/libssl.a" ] && [ ! -f "$PREFIX/lib64/libssl.a" ]; then
-            echo "ERROR: OpenSSL libssl.a not found under $PREFIX/lib or $PREFIX/lib64" >&2
-            exit 1
-          fi
-          if [ ! -f "$PREFIX/lib/libcrypto.a" ] && [ ! -f "$PREFIX/lib64/libcrypto.a" ]; then
-            echo "ERROR: OpenSSL libcrypto.a not found under $PREFIX/lib or $PREFIX/lib64" >&2
-            exit 1
-          fi
           cd ..
           # SQLite3
           wget -q https://www.sqlite.org/2024/sqlite-autoconf-3450200.tar.gz
@@ -860,30 +843,15 @@ jobs:
             fi
           done
 
-      - name: Build (Windows x86_64 static)
+      - name: Build chatrun (Windows x86_64 static)
         run: |
-          mkdir -p build/obj build/bin
+          make clean
+          make -j$(nproc) all_static_win
 
-          INC_FLAGS="-I$PREFIX/include"
-          LIB_FLAGS="-L$PREFIX/lib -L$PREFIX/lib64"
-          
-          for cpp_file in src/main/cpp/*.cpp; do
-            obj_file="build/obj/$(basename ${cpp_file%.cpp}).o"
-            $CXX -std=c++20 -O3 -Wall -Wextra \
-              -DCPPHTTPLIB_OPENSSL_SUPPORT \
-              -DCURL_STATICLIB -DOPENSSL_STATIC \
-              -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -DNTDDI_VERSION=0x0A000000 \
-              $INC_FLAGS \
-              -c "$cpp_file" -o "$obj_file"
-          done
-          
-          $CXX build/obj/*.o -o build/bin/gpt-windows-x64.exe \
-            -static -static-libgcc -static-libstdc++ \
-            $LIB_FLAGS \
-            -lws2_32 -lwinmm -lcrypt32 -lbcrypt -lsecur32 -lwldap32 -liphlpapi -lnormaliz \
-            -lcurl -lssl -lcrypto -lsqlite3 -lnghttp2 -lzstd -lz
-          
-          $STRIP build/bin/gpt-windows-x64.exe || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpt-windows-static
+          path: build/bin/gpt-windows-x64.exe
 
       - uses: actions/upload-artifact@v4
         with:

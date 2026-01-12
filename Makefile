@@ -14,7 +14,7 @@ CXXFLAGS := -std=c++20 -O3 -Wall -Wextra \
 LDFLAGS  := -L/usr/local/lib
 LIBS     := -static -lstdc++ -lm -lcurl -lssl -lcrypto -lsqlite3 -lnghttp2 -lzstd -lz -lresolv -lpthread -ldl
 
-TARGET   := $(BIN_DIR)/gpt4
+TARGET   := $(BIN_DIR)/gpt-linux-x64
 
 all: $(TARGET)
 
@@ -53,7 +53,7 @@ WIN_LIBS     := \
   -lcurl -lpsl -lidn2 -lunistring -lssl -lcrypto -lsqlite3 -lnghttp2 -lz -lzstd \
   -lwinpthread -lws2_32 -lcrypt32 -lbcrypt -lwinmm -lgdi32
 
-WIN_TARGET   := $(BIN_DIR)/gpt4.exe
+WIN_TARGET   := $(BIN_DIR)/gpt-windows-x64.exe
 
 all_static_win: CXX      := $(WIN_CXX)
 all_static_win: CXXFLAGS := $(WIN_CXXFLAGS)
