@@ -123,13 +123,18 @@ std::string download_once_to_data_uri(const std::string& image_url) {
     }
     
     curl_easy_setopt(curl, CURLOPT_URL, image_url.c_str());
-    // 强制不走任何代理
-    curl_easy_setopt(curl, CURLOPT_PROXY, "");
-    curl_easy_setopt(curl, CURLOPT_NOPROXY, "*");
+
+    // Debug: 强制使用本地 HTTP 代理（Charles/Fiddler/mitmproxy 等）
+    // 代理地址：127.0.0.1:5257
+    curl_easy_setopt(curl, CURLOPT_PROXY, "http://127.0.0.1:5257");
+    curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &data);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+
+    // Debug: 不验证证书（仅用于抓包/调试）
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     
@@ -213,9 +218,10 @@ nlohmann::json get_token() {
     headers = curl_slist_append(headers, "Content-Type: application/json");
     
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    // 强制不走任何代理
-    curl_easy_setopt(curl, CURLOPT_PROXY, "");
-    curl_easy_setopt(curl, CURLOPT_NOPROXY, "*");
+
+    // Debug: 强制使用本地 HTTP 代理（Charles/Fiddler/mitmproxy 等）
+    curl_easy_setopt(curl, CURLOPT_PROXY, "http://127.0.0.1:5257");
+    curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
     
     res = curl_easy_perform(curl);
     

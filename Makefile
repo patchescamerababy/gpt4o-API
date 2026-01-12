@@ -10,6 +10,7 @@ OBJECTS := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(SOURCES))
 # Linux 本机构建
 CXX      := g++
 CXXFLAGS := -std=c++20 -O3 -Wall -Wextra \
+            -DCPPHTTPLIB_OPENSSL_SUPPORT \
             -I/usr/local/include -I/usr/local/include/httplib -I/usr/local/include/nlohmann
 LDFLAGS  := -L/usr/local/lib
 LIBS     := -static -lstdc++ -lm -lcurl -lssl -lcrypto -lsqlite3 -lnghttp2 -lzstd -lz -lresolv -lpthread -ldl
@@ -44,6 +45,7 @@ WIN_CXX := $(CROSS)-g++
 
 # ---- 编译阶段 ----
 WIN_CXXFLAGS := -std=c++20 -O3 -Wall -Wextra \
+                -DCPPHTTPLIB_OPENSSL_SUPPORT \
                 -DNGHTTP2_STATICLIB -DCURL_STATICLIB -DOPENSSL_STATIC \
                 -I$(PREFIX)/include
 

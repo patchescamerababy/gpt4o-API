@@ -1,5 +1,6 @@
 #include "chat_proxy.h"
 #include "utils.h"
+#include <curl/curl.h>
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <sstream>
@@ -20,9 +21,34 @@
 
 using json = nlohmann::json;
 
+static std::once_flag g_curl_init_flag;
+
+static void ensure_curl_global_init() {
+    std::call_once(g_curl_init_flag, []() {
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+    });
+}
+
+static bool should_retry_handshake(CURLcode rc, const char* errbuf) {
+    // 覆盖常见 TLS/握手失败场景（包含 “Remote host terminated the handshake”）
+    if (rc == CURLE_SSL_CONNECT_ERROR || rc == CURLE_SSL_CACERT || rc == CURLE_PEER_FAILED_VERIFICATION) {
+        return true;
+    }
+    if (!errbuf || errbuf[0] == '\0') return false;
+
+    std::string s(errbuf);
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+
+    if (s.find("handshake") != std::string::npos) return true;
+    if (s.find("tls") != std::string::npos && s.find("alert") != std::string::npos) return true;
+    if (s.find("connection was reset") != std::string::npos) return true;
+    return false;
+}
 
 
 ChatProxy::ChatProxy() {
+    ensure_curl_global_init();
+
     // Prefer cached token initialized at startup; fall back to active refresh.
     try {
         nlohmann::json cached = Utils::get_cached_token();
@@ -99,7 +125,11 @@ void ChatProxy::ensure_valid_token() {
 }
 
 void ChatProxy::handle(const httplib::Request& req, httplib::Response& res) {
+    std::cout << "[DEBUG] handle: ENTER, method=" << req.method << std::endl;
+    std::cout.flush();
     ensure_valid_token();
+    std::cout << "[DEBUG] handle: token validated" << std::endl;
+    std::cout.flush();
     res.set_header("Access-Control-Allow-Origin", "*");
     res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -216,10 +246,22 @@ std::string html = R"(
             request_json["messages"] = new_messages;
         }
         
+        // 关键：必须把“预处理后的 request_json”发送给上游（对齐 Java 行为）
+        const std::string upstream_request_body = request_json.dump();
+        std::cout << "[DEBUG] handle: upstream_request_body size=" << upstream_request_body.size() << std::endl;
+        std::cout << "[DEBUG] handle: is_stream=" << is_stream << std::endl;
+        std::cout.flush();
+
         if (is_stream) {
-            handle_stream_response(req, res, need_usage_chunk);
+            std::cout << "[DEBUG] handle: calling handle_stream_response..." << std::endl;
+            std::cout.flush();
+            handle_stream_response(upstream_request_body, res, need_usage_chunk);
+            std::cout << "[DEBUG] handle: handle_stream_response returned" << std::endl;
         } else {
-            handle_normal_response(req, res);
+            std::cout << "[DEBUG] handle: calling handle_normal_response..." << std::endl;
+            std::cout.flush();
+            handle_normal_response(upstream_request_body, res);
+            std::cout << "[DEBUG] handle: handle_normal_response returned" << std::endl;
         }
         
     } catch (const std::exception& e) {
@@ -363,10 +405,15 @@ std::string ChatProxy::build_usage_sse_chunk(const std::string& convo_id, int pr
     return "data: " + response.dump() + "\n\n";
 }
 
-void ChatProxy::handle_stream_response(const httplib::Request& req, httplib::Response& res, bool need_usage_chunk) {
-    json req_json = json::parse(req.body);
+void ChatProxy::handle_stream_response(const std::string& request_body, httplib::Response& res, bool need_usage_chunk) {
+    std::cout << "[DEBUG] handle_stream_response: ENTER" << std::endl;
+    // 关键修复：立刻拷贝 request_body 到局部变量，避免 lambda 异步访问时悬空
+    const std::string request_body_copy = request_body;
+    std::cout << "[DEBUG] handle_stream_response: request_body_copy size=" << request_body_copy.size() << std::endl;
+    json req_json = json::parse(request_body_copy);
+    std::cout << "[DEBUG] handle_stream_response: parsed JSON" << std::endl;
 
-    // 计算prompt tokens（与Java版本对齐）
+    // 计算prompt tokens（与Java版本对齐，近似算法）
     int prompt_tokens = 0;
     if (req_json.contains("messages")) {
         std::string prompt_text;
@@ -383,8 +430,6 @@ void ChatProxy::handle_stream_response(const httplib::Request& req, httplib::Res
                 }
             }
         }
-        // 使用GPT-4标准：约1token=0.75个英文单词，1个中文字符≈2-3tokens
-        // 简化算法：英文按4字符/token，中文按1.5字符/token
         int char_count = static_cast<int>(prompt_text.length());
         int chinese_chars = 0;
         for (char c : prompt_text) {
@@ -392,197 +437,350 @@ void ChatProxy::handle_stream_response(const httplib::Request& req, httplib::Res
         }
         int english_chars = char_count - chinese_chars;
         prompt_tokens = (english_chars / 4) + (chinese_chars * 2 / 3);
-        if (prompt_tokens < char_count / 6) prompt_tokens = char_count / 6; // 最小值保护
+        if (prompt_tokens < char_count / 6) prompt_tokens = char_count / 6;
     }
 
     try {
-        // Build upstream request details
-        const std::string upstream_host = "https://python-app-qjk4mlqqha-uc.a.run.app";
-        const std::string upstream_path = "/ai/chat/completion";
-        std::string request_body = req_json.dump();
+        std::cout << "[DEBUG] handle_stream_response: entering try block" << std::endl;
+        const std::string upstream_url = "https://python-app-qjk4mlqqha-uc.a.run.app/ai/chat/completion";
+        std::cout << "[DEBUG] handle_stream_response: upstream_url=" << upstream_url << std::endl;
 
-        // Prepare common headers
-        httplib::Headers headers;
-        headers.emplace("Content-Type", "application/json");
-        headers.emplace("Accept", "application/json");
-        headers.emplace("User-Agent", "AIGE/2.5.0 (cpp-httplib)");
-        headers.emplace("x-api-key", "07D76661F-9337-462F-8645-D8866290F8D8-AI");
-        if (!token_.empty()) {
-            headers.emplace("Authorization", token_); // token_ already includes the value expected by upstream
+        // ========== 关键对齐 Java：先探测上游状态码，不成功则“直接返回上游响应体”，不要发 SSE ==========
+        std::string probe_body;
+        std::string probe_content_type;
+
+        auto write_cb_str = [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
+            auto* out = static_cast<std::string*>(userdata);
+            size_t n = size * nmemb;
+            out->append(ptr, n);
+            return n;
+        };
+
+        auto header_cb_ct = [](char* buffer, size_t size, size_t nitems, void* userdata) -> size_t {
+            size_t n = size * nitems;
+            auto* ct = static_cast<std::string*>(userdata);
+            if (!ct) return n;
+
+            std::string line(buffer, buffer + n);
+            auto tolower_str = [](std::string s) {
+                std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+                return s;
+            };
+            std::string lower = tolower_str(line);
+            const std::string key = "content-type:";
+            if (lower.rfind(key, 0) == 0) {
+                std::string v = line.substr(key.size());
+                auto l = v.find_first_not_of(" \t");
+                auto r = v.find_last_not_of(" \t\r\n");
+                if (l != std::string::npos && r != std::string::npos && r >= l) {
+                    *ct = v.substr(l, r - l + 1);
+                }
+            }
+            return n;
+        };
+
+        long probe_code = 0;
+        {
+            std::cout << "[DEBUG] handle_stream_response: starting probe request" << std::endl;
+
+            CURLcode rc = CURLE_OK;
+            char errbuf[CURL_ERROR_SIZE];
+            errbuf[0] = '\0';
+
+            for (int attempt = 1; attempt <= 3; ++attempt) {
+                if (attempt > 1) {
+                    std::cout << "[WARN] handle_stream_response: probe handshake error, retry attempt " << attempt << std::endl;
+                    probe_body.clear();
+                    probe_content_type.clear();
+                    probe_code = 0;
+                    errbuf[0] = '\0';
+                    std::this_thread::sleep_for(std::chrono::milliseconds(150L * attempt));
+                }
+
+                CURL* curl = curl_easy_init();
+                if (!curl) throw std::runtime_error("CURL初始化失败");
+                std::cout << "[DEBUG] handle_stream_response: probe curl initialized (attempt " << attempt << ")" << std::endl;
+
+                struct curl_slist* headers = nullptr;
+                headers = curl_slist_append(headers, "Accept: application/json");
+                headers = curl_slist_append(headers, "Content-Type: application/json; charset=utf-8");
+                headers = curl_slist_append(headers, "x-api-key: 07D76661F-9337-462F-8645-D8866290F8D8-AI");
+                headers = curl_slist_append(headers, "User-Agent: AIGE/2.5.0 (com.botai.chat; build:192; iOS 18.1.1) Alamofire/5.9.1");
+                headers = curl_slist_append(headers, "Accept-Language: zh-Hans-HK;q=1.0, ja-HK;q=0.9, zh-Hant-TW;q=0.8, en-HK;q=0.7, wuu-Hans-HK;q=0.6");
+
+                std::string auth = "Authorization: " + token_;
+                headers = curl_slist_append(headers, auth.c_str());
+
+                curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+                curl_easy_setopt(curl, CURLOPT_URL, upstream_url.c_str());
+                curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+                curl_easy_setopt(curl, CURLOPT_POST, 1L);
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request_body_copy.c_str());
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)request_body_copy.size());
+                curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_1_1);
+                curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+                // Debug: proxy + no cert verify (disabled)
+                // curl_easy_setopt(curl, CURLOPT_PROXY, "http://127.0.0.1:5257");
+                // curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+                // 强制 HTTPS 走 HTTP proxy tunnel（CONNECT）
+                // curl_easy_setopt(curl, CURLOPT_HTTPPROXYTUNNEL, 1L);
+                curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+                curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+
+                // accept gzip and auto-decompress
+                curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+
+                curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +write_cb_str);
+                curl_easy_setopt(curl, CURLOPT_WRITEDATA, &probe_body);
+
+                curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, +header_cb_ct);
+                curl_easy_setopt(curl, CURLOPT_HEADERDATA, &probe_content_type);
+
+                std::cout << "[DEBUG] handle_stream_response: probe curl_easy_perform... (attempt " << attempt << ")" << std::endl;
+                rc = curl_easy_perform(curl);
+                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &probe_code);
+                std::cout << "[DEBUG] handle_stream_response: probe completed, code=" << probe_code << " rc=" << rc << " (" << curl_easy_strerror(rc) << ")" << std::endl;
+                if (errbuf[0] != '\0') {
+                    std::cout << "[DEBUG] handle_stream_response: probe errbuf=" << errbuf << std::endl;
+                }
+
+                curl_slist_free_all(headers);
+                curl_easy_cleanup(curl);
+
+                if (rc == CURLE_OK) break;
+
+                if (attempt < 3 && should_retry_handshake(rc, errbuf)) {
+                    continue;
+                }
+
+                break;
+            }
+
+            if (rc != CURLE_OK) {
+                std::string msg = std::string("curl probe failed: ") + curl_easy_strerror(rc);
+                if (errbuf[0] != '\0') {
+                    msg += std::string(" | ") + errbuf;
+                }
+                msg += std::string(" | proxy=http://127.0.0.1:5257 tunnel=1 url=") + upstream_url;
+                throw std::runtime_error(msg);
+            }
         }
 
-        // 1) Make a non-streaming upstream request to capture actual status and body for error transparency.
-        httplib::Client probe_cli(upstream_host);
-#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-        probe_cli.enable_server_certificate_verification(false);
-#endif
-        // Use a regular POST to get full response body and status
-        auto probe_result = probe_cli.Post(upstream_path.c_str(), headers, request_body, "application/json");
-        if (!probe_result) {
-            // 无上游响应体可透传，返回最小纯文本错误，避免构造JSON
-            res.status = 502;
-            res.set_header("Content-Type", "text/plain; charset=utf-8");
-            res.body = "Upstream probe failed";
-            return;
-        }
-        int status = probe_result->status;
-        if (!(status >= 200 && status < 300)) {
-            // 读取并打印上游错误响应体，然后透传给下游
-            std::cout << "Upstream error " << status << ": " << probe_result->body << std::endl;
-            res.status = status;
-            // 透传上游 Content-Type（如果有）
-            auto ct_it = probe_result->headers.find("Content-Type");
-            if (ct_it != probe_result->headers.end()) {
-                res.set_header("Content-Type", ct_it->second.c_str());
+        if (!(probe_code >= 200 && probe_code < 300)) {
+            // Java 逻辑：upstream 非 2xx 时，直接返回上游响应体（不要 SSE）
+            res.status = (int)probe_code;
+            if (!probe_content_type.empty()) {
+                res.set_header("Content-Type", probe_content_type.c_str());
             } else {
                 res.set_header("Content-Type", "application/json; charset=utf-8");
             }
-            res.body = probe_result->body;
+            res.body = probe_body;
             return;
         }
 
-        // 2) Upstream is 2xx - stream it incrementally as SSE.
-        // Use a chunked content provider that will perform a second request and forward content chunks immediately.
+        // ========== 上游成功：开始 SSE ==========
         res.set_header("Content-Type", "text/event-stream; charset=utf-8");
         res.set_header("Cache-Control", "no-cache");
         res.set_header("Connection", "keep-alive");
 
-        // 默认假定成功为200，但如果非2xx则用上游错误码
-        int stream_status_to_set = 200;
+        const std::string convo_id = "chatcmpl-" + Utils::generate_uuid().substr(0, 24);
+        const std::string system_fingerprint = "fp_" + Utils::generate_uuid().substr(0, 12);
 
-        // Generate conversation id & system fingerprint (fixed per stream)
-        std::string convo_id = "chatcmpl-" + Utils::generate_uuid().substr(0, 24);
-        std::string system_fingerprint = "fp_" + Utils::generate_uuid().substr(0, 12);
+        // 关键修复：CurlStreamCtx 必须持有 convo_id/system_fingerprint 的**拷贝**，
+        // 不能是引用，否则 lambda 异步执行时原 string 已被销毁
+        struct CurlStreamCtx {
+            httplib::DataSink* sink;
+            ChatProxy* self;
+            std::string convo_id;       // 持有拷贝
+            std::string system_fingerprint; // 持有拷贝
+            bool need_usage;
+            std::string completion_buffer;
+            bool write_ok;
+            bool any_data;
+        };
 
-        // We will capture completion token counts incrementally (simplified)
-        std::shared_ptr<std::atomic<int>> accumulated_completion_tokens = std::make_shared<std::atomic<int>>(0);
+        auto write_cb = [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
+            auto* ctx = static_cast<CurlStreamCtx*>(userdata);
+            size_t n = size * nmemb;
+            if (n == 0 || !ctx || !ctx->sink) return 0;
+            if (!ctx->write_ok) return 0;
 
-        // Provider: called by httplib to stream content. It should block and push SSE chunks via sink.write(...)
-        res.set_chunked_content_provider("text/event-stream; charset=utf-8",
-            [=, this, &res, &stream_status_to_set](size_t /*offset*/, httplib::DataSink &sink) -> bool {
-                try {
-                    // 1) Send initial SSE chunk
-                    std::string initial = build_initial_sse_chunk(convo_id, system_fingerprint);
-                    if (!sink.write(initial.c_str(), initial.size())) {
-                        return false;
-                    }
+            std::string delta(ptr, ptr + n);
+            ctx->any_data = true;
+            std::cout << delta << std::flush;
 
-                    // 2) Perform upstream POST and stream body via content_receiver
-                    httplib::Client stream_cli(upstream_host);
-    #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-                    stream_cli.enable_server_certificate_verification(false);
-    #endif
-                    httplib::Request stream_req;
-                    stream_req.method = "POST";
-                    stream_req.path = upstream_path;
-                    stream_req.headers = headers;
-                    stream_req.body = request_body;
+            if (ctx->need_usage) {
+                ctx->completion_buffer += delta;
+            }
 
-                    // 用于累积所有completion内容，以便最后计算总token数
-                    std::shared_ptr<std::string> completion_buffer = need_usage_chunk ? std::make_shared<std::string>() : nullptr;
+            std::string sse = ctx->self->build_content_sse_chunk(delta, ctx->convo_id, ctx->system_fingerprint);
+            if (!ctx->sink->write(sse.c_str(), sse.size())) {
+                // 客户端断开/底层 sink 失效：立刻标记并让 curl 停止写入
+                ctx->write_ok = false;
+                return 0;
+            }
+            return n;
+        };
 
-                    // 用于累积所有错误内容（无论上游是否分块输出）
-                    std::shared_ptr<std::string> error_buffer = std::make_shared<std::string>();
+        std::cout << "[DEBUG] handle_stream_response: setting chunked_content_provider" << std::endl;
+        res.set_chunked_content_provider(
+            "text/event-stream; charset=utf-8",
+            [=, this, &res](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+                std::cout << "[DEBUG] Lambda: ENTER" << std::endl;
+                std::string initial = build_initial_sse_chunk(convo_id, system_fingerprint);
+                if (!sink.write(initial.c_str(), initial.size())) {
+                    return false;
+                }
 
-                    // content_receiver will be called as upstream body data arrives
-                    stream_req.content_receiver = [=, this, &sink, &error_buffer](const char* data, size_t data_length, size_t /*offset*/, size_t /*total_length*/) -> bool {
-                        if (data_length == 0) return true;
-                        std::string delta(data, data_length);
-                        std::cout << delta << std::flush;
-                        // accumulate for completion tokens calculation
-                        if (need_usage_chunk && completion_buffer) {
-                            *completion_buffer += delta;
-                        }
-                        // accumulate for error fallback
-                        *error_buffer += delta;
-
-                        std::string sse = build_content_sse_chunk(delta, convo_id, system_fingerprint);
-                        if (!sink.write(sse.c_str(), sse.size())) {
-                            return false;
-                        }
-                        return true;
-                    };
-
-                    // Execute streaming request (this will block until upstream completes or error)
-                    auto stream_result = stream_cli.send(stream_req);
-
-                    if (!stream_result || stream_result->status < 200 || stream_result->status >= 300) {
-                        // 设置下游响应码为上游错误码
-                        int upstream_error_code = stream_result ? stream_result->status : 502;
-                        stream_status_to_set = upstream_error_code;
-
-                        // upstream error, surface all collected error response
-                        std::string errChunk = "data: " + *error_buffer;
-                        // 补齐从stream_result->body遗漏部分（极端情况下可能有）
-                        if (stream_result && stream_result->body.size() && error_buffer->find(stream_result->body) == std::string::npos) {
-                            errChunk += stream_result->body;
-                        }
-                        errChunk += "\n\n";
-                        sink.write(errChunk.c_str(), errChunk.size());
-                    }
-
-                    // 3) Send finish SSE chunk
-                    std::string finish = build_finish_sse_chunk(convo_id, system_fingerprint);
-                    if (!sink.write(finish.c_str(), finish.size())) {
-                        return false;
-                    }
-
-                    // 4) If requested, send usage chunk
-                    if (need_usage_chunk && completion_buffer) {
-                        // 计算completion tokens，与Java版本类似的逻辑
-                        int completionTokens = 0;
-                        if (!completion_buffer->empty()) {
-                            int char_count = static_cast<int>(completion_buffer->length());
-                            int chinese_chars = 0;
-                            for (char c : *completion_buffer) {
-                                if ((unsigned char)c > 127) chinese_chars++;
-                            }
-                            int english_chars = char_count - chinese_chars;
-                            completionTokens = (english_chars / 4) + (chinese_chars * 2 / 3);
-                            if (completionTokens < char_count / 6) completionTokens = char_count / 6; // 最小值保护
-                        }
-                        int totalTokens = prompt_tokens + completionTokens;
-                        std::string usage = build_usage_sse_chunk(convo_id, prompt_tokens, completionTokens, totalTokens, system_fingerprint);
-                        if (!sink.write(usage.c_str(), usage.size())) {
-                            return false;
-                        }
-                    }
-
-                    // 5) [DONE] marker
-                    std::string done = "data: [DONE]\n\n";
-                    if (!sink.write(done.c_str(), done.size())) {
-                        return false;
-                    }
-
-                    // Signal completion
-                    sink.done();
-
-                    // 在收完流之后设置最终响应状态码
-                    res.status = stream_status_to_set;
-                    return true;
-                } catch (const std::exception& e) {
-                    try {
-                        std::string finish2 = build_finish_sse_chunk(convo_id, system_fingerprint);
-                        sink.write(finish2.c_str(), finish2.size());
-                        std::string done2 = "data: [DONE]\n\n";
-                        sink.write(done2.c_str(), done2.size());
-                        sink.done();
-                    } catch (...) {}
-                    // 上游异常，状态码502
+                CURL* curl = curl_easy_init();
+                if (!curl) {
                     res.status = 502;
                     return false;
                 }
-            },
-            // resource releaser - no-op
-            [](bool /*success*/){ /* nothing to release */ }
-        );
 
+                struct curl_slist* headers = nullptr;
+                headers = curl_slist_append(headers, "Accept: application/json");
+                headers = curl_slist_append(headers, "Content-Type: application/json; charset=utf-8");
+                headers = curl_slist_append(headers, "x-api-key: 07D76661F-9337-462F-8645-D8866290F8D8-AI");
+                headers = curl_slist_append(headers, "User-Agent: AIGE/2.5.0 (com.botai.chat; build:192; iOS 18.1.1) Alamofire/5.9.1");
+                headers = curl_slist_append(headers, "Accept-Language: zh-Hans-HK;q=1.0, ja-HK;q=0.9, zh-Hant-TW;q=0.8, en-HK;q=0.7, wuu-Hans-HK;q=0.6");
+
+                std::cout << "[DEBUG] Lambda: preparing auth header" << std::endl;
+                std::string auth = "Authorization: " + token_;
+                std::cout << "[DEBUG] Lambda: auth prepared, token_ length=" << token_.length() << std::endl;
+                headers = curl_slist_append(headers, auth.c_str());
+
+                // 关键：必须拷贝 convo_id/system_fingerprint 进 ctx（不能用引用/指针）
+                CurlStreamCtx ctx;
+                ctx.sink = &sink;
+                ctx.self = const_cast<ChatProxy*>(this);
+                ctx.convo_id = convo_id;  // 拷贝构造
+                ctx.system_fingerprint = system_fingerprint;  // 拷贝构造
+                ctx.need_usage = need_usage_chunk;
+                ctx.completion_buffer = "";
+                ctx.write_ok = true;
+                ctx.any_data = false;
+
+                CURLcode rc = CURLE_OK;
+                long http_code = 0;
+                char errbuf[CURL_ERROR_SIZE];
+
+                for (int attempt = 1; attempt <= 3; ++attempt) {
+                    if (attempt > 1) {
+                        std::cout << "[WARN] Lambda: handshake error, retry attempt " << attempt << std::endl;
+                        ctx.write_ok = true;
+                        ctx.any_data = false;
+                        http_code = 0;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(150L * attempt));
+                    }
+
+                    errbuf[0] = '\0';
+                    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+                    curl_easy_setopt(curl, CURLOPT_URL, upstream_url.c_str());
+                    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+                    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+                    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request_body_copy.c_str());
+                    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)request_body_copy.size());
+                    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_1_1);
+                    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+                    // curl_easy_setopt(curl, CURLOPT_PROXY, "http://127.0.0.1:5257");
+                    // curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+                    // 强制 HTTPS 走 HTTP proxy tunnel（CONNECT）
+                    // curl_easy_setopt(curl, CURLOPT_HTTPPROXYTUNNEL, 1L);
+                    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+                    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+
+                    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+
+                    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +write_cb);
+                    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+
+                    std::cout << "[DEBUG] Lambda: calling curl_easy_perform... (attempt " << attempt << ")" << std::endl;
+                    rc = curl_easy_perform(curl);
+                    std::cout << "[DEBUG] Lambda: curl_easy_perform returned, rc=" << rc << " (" << curl_easy_strerror(rc) << ")" << std::endl;
+                    if (errbuf[0] != '\0') {
+                        std::cout << "[DEBUG] Lambda: errbuf=" << errbuf << std::endl;
+                    }
+
+                    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+                    if (rc == CURLE_OK) break;
+
+                    // 仅在还没输出任何数据时重试（避免重复向客户端输出）
+                    if (attempt < 3 && !ctx.any_data && should_retry_handshake(rc, errbuf)) {
+                        continue;
+                    }
+
+                    break;
+                }
+
+                curl_slist_free_all(headers);
+                curl_easy_cleanup(curl);
+
+                // 如果 write_cb 已经检测到 sink 失效（例如客户端断开），不要再继续对 sink.write()，否则可能触发崩溃
+                if (!ctx.write_ok) {
+                    res.status = 499; // client closed request（非标准，但用于区分）
+                    sink.done();
+                    return false;
+                }
+
+                if (rc != CURLE_OK) {
+                    // curl 写失败/网络失败：同样不要再写 finish/usage/done（避免在异常状态下触发 httplib 内部崩溃）
+                    res.status = 502;
+                    sink.done();
+                    return false;
+                }
+
+                if (!(http_code >= 200 && http_code < 300)) {
+                    // 理论上 probe 已 2xx，但这里兜底：结束 SSE
+                    res.status = (int)http_code;
+                } else {
+                    res.status = 200;
+                }
+
+                // 下面开始写 SSE 结束块：任何一次写失败都立即停止
+                std::string finish = build_finish_sse_chunk(convo_id, system_fingerprint);
+                if (!sink.write(finish.c_str(), finish.size())) {
+                    sink.done();
+                    return false;
+                }
+
+                if (need_usage_chunk) {
+                    int completionTokens = 0;
+                    if (!ctx.completion_buffer.empty()) {
+                        int char_count = static_cast<int>(ctx.completion_buffer.length());
+                        int chinese_chars = 0;
+                        for (char c : ctx.completion_buffer) {
+                            if ((unsigned char)c > 127) chinese_chars++;
+                        }
+                        int english_chars = char_count - chinese_chars;
+                        completionTokens = (english_chars / 4) + (chinese_chars * 2 / 3);
+                        if (completionTokens < char_count / 6) completionTokens = char_count / 6;
+                    }
+                    int totalTokens = prompt_tokens + completionTokens;
+                    std::string usage = build_usage_sse_chunk(convo_id, prompt_tokens, completionTokens, totalTokens, system_fingerprint);
+                    if (!sink.write(usage.c_str(), usage.size())) {
+                        sink.done();
+                        return false;
+                    }
+                }
+
+                std::string done = "data: [DONE]\n\n";
+                if (!sink.write(done.c_str(), done.size())) {
+                    sink.done();
+                    return false;
+                }
+
+                sink.done();
+                return true;
+            },
+            [](bool /*success*/) {}
+        );
     } catch (const std::exception& e) {
-        // 在这里也尽可能将上游错误透传给下游，而不是统一 Internal Server Error
-        // 如果 e 是我们在请求上游时抛出的异常，通常没有现成的上游响应体。
-        // 但此处至少返回可读的 JSON 错误，并保持 application/json。
         res.set_header("Content-Type", "application/json; charset=utf-8");
-        res.status = 502; // Bad Gateway，表明是上游失败
+        res.status = 502;
         nlohmann::json err;
         err["error"] = "Upstream request failed";
         err["detail"] = e.what();
@@ -590,52 +788,173 @@ void ChatProxy::handle_stream_response(const httplib::Request& req, httplib::Res
     }
 }
 
-void ChatProxy::handle_normal_response(const httplib::Request& req, httplib::Response& res) {
-    json req_json = json::parse(req.body);
-
+void ChatProxy::handle_normal_response(const std::string& request_body, httplib::Response& res) {
+    std::cout << "[DEBUG] handle_normal_response: ENTER, request_body size=" << request_body.size() << std::endl;
+    std::cout.flush();
     try {
-        // 为了在非2xx时也返回上游原始错误体，这里不用 send_request 封装，改用 httplib 直接请求拿到 status+body
-        const std::string upstream_host = "https://python-app-qjk4mlqqha-uc.a.run.app";
-        const std::string upstream_path = "/ai/chat/completion";
-        httplib::Client cli(upstream_host);
-#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-        cli.enable_server_certificate_verification(false);
-#endif
-        httplib::Headers headers;
-        headers.emplace("Content-Type", "application/json");
-        headers.emplace("Accept", "application/json");
-        headers.emplace("User-Agent", "AIGE/2.5.0 (cpp-httplib)");
-        headers.emplace("x-api-key", "07D76661F-9337-462F-8645-D8866290F8D8-AI");
-        if (!token_.empty()) {
-            headers.emplace("Authorization", token_);
+        const std::string upstream_url = "https://python-app-qjk4mlqqha-uc.a.run.app/ai/chat/completion";
+        std::cout << "[DEBUG] handle_normal_response: upstream_url=" << upstream_url << std::endl;
+
+        CURL* curl = curl_easy_init();
+        if (!curl) {
+            throw std::runtime_error("CURL初始化失败");
         }
 
-        auto r = cli.Post(upstream_path.c_str(), headers, req_json.dump(), "application/json");
-        if (!r) {
-            // 网络失败：返回 502 + 简单 JSON 说明
-            res.set_header("Content-Type", "application/json; charset=utf-8");
+        struct curl_slist* headers = nullptr;
+        headers = curl_slist_append(headers, "Accept: application/json");
+        headers = curl_slist_append(headers, "Content-Type: application/json; charset=utf-8");
+        headers = curl_slist_append(headers, "x-api-key: 07D76661F-9337-462F-8645-D8866290F8D8-AI");
+        headers = curl_slist_append(headers, "User-Agent: AIGE/2.5.0 (com.botai.chat; build:192; iOS 18.1.1) Alamofire/5.9.1");
+        headers = curl_slist_append(headers, "Accept-Language: zh-Hans-HK;q=1.0, ja-HK;q=0.9, zh-Hant-TW;q=0.8, en-HK;q=0.7, wuu-Hans-HK;q=0.6");
+
+        std::string auth = "Authorization: " + token_;
+        headers = curl_slist_append(headers, auth.c_str());
+
+        std::string response_body;
+
+        // capture upstream Content-Type for transparent pass-through
+        std::string upstream_content_type;
+
+        auto write_cb = [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
+            auto* out = static_cast<std::string*>(userdata);
+            if (!out) {
+                std::cout << "[ERROR] write_cb: userdata is NULL!" << std::endl;
+                return 0;
+            }
+            size_t n = size * nmemb;
+            std::cout << "[DEBUG] write_cb: received " << n << " bytes" << std::endl;
+            try {
+                out->append(ptr, n);
+                std::cout << "[DEBUG] write_cb: appended successfully, total size now=" << out->size() << std::endl;
+                return n;
+            } catch (const std::exception& e) {
+                std::cout << "[ERROR] write_cb: exception: " << e.what() << std::endl;
+                return 0;
+            }
+        };
+
+        auto header_cb = [](char* buffer, size_t size, size_t nitems, void* userdata) -> size_t {
+            size_t n = size * nitems;
+            auto* ct = static_cast<std::string*>(userdata);
+            if (!ct) return n;
+
+            std::string line(buffer, buffer + n);
+            // very small parser: look for "Content-Type:" case-insensitive
+            auto tolower_str = [](std::string s) {
+                std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+                return s;
+            };
+            std::string lower = tolower_str(line);
+            const std::string key = "content-type:";
+            if (lower.rfind(key, 0) == 0) {
+                std::string v = line.substr(key.size());
+                // trim
+                auto l = v.find_first_not_of(" \t");
+                auto r = v.find_last_not_of(" \t\r\n");
+                if (l != std::string::npos && r != std::string::npos && r >= l) {
+                    *ct = v.substr(l, r - l + 1);
+                }
+            }
+            return n;
+        };
+
+        char errbuf[CURL_ERROR_SIZE];
+        errbuf[0] = '\0';
+        curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+        curl_easy_setopt(curl, CURLOPT_URL, upstream_url.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request_body.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)request_body.size());
+        curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_1_1);
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+        // Debug: proxy + no cert verify
+        // curl_easy_setopt(curl, CURLOPT_PROXY, "http://127.0.0.1:5257");
+        // curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+        // 强制 HTTPS 走 HTTP proxy tunnel（CONNECT）
+        // curl_easy_setopt(curl, CURLOPT_HTTPPROXYTUNNEL, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+
+        // accept gzip and auto-decompress
+        curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+
+        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, +header_cb);
+        curl_easy_setopt(curl, CURLOPT_HEADERDATA, &upstream_content_type);
+
+        CURLcode rc = CURLE_OK;
+
+        for (int attempt = 1; attempt <= 3; ++attempt) {
+            if (attempt > 1) {
+                std::cout << "[WARN] handle_normal_response: handshake error, retry attempt " << attempt << std::endl;
+                response_body.clear();
+                upstream_content_type.clear();
+                errbuf[0] = '\0';
+                std::this_thread::sleep_for(std::chrono::milliseconds(150L * attempt));
+            }
+
+            std::cout << "[DEBUG] handle_normal_response: calling curl_easy_perform... (attempt " << attempt << ")" << std::endl;
+            std::cout.flush();
+            rc = curl_easy_perform(curl);
+            std::cout << "[DEBUG] handle_normal_response: curl_easy_perform returned, rc=" << rc << " (" << curl_easy_strerror(rc) << ")" << std::endl;
+            if (errbuf[0] != '\0') {
+                std::cout << "[DEBUG] handle_normal_response: errbuf=" << errbuf << std::endl;
+            }
+
+            if (rc == CURLE_OK) break;
+
+            if (attempt < 3 && should_retry_handshake(rc, errbuf)) {
+                continue;
+            }
+
+            break;
+        }
+
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        if (rc != CURLE_OK) {
+            std::string msg = std::string("curl failed: ") + curl_easy_strerror(rc);
+            if (errbuf[0] != '\0') {
+                msg += std::string(" | errbuf=") + errbuf;
+            }
+            msg += std::string(" | proxy=http://127.0.0.1:5257 tunnel=1 url=") + upstream_url;
+            std::cout << "[ERROR] " << msg << std::endl;
+            std::cout.flush();
+            throw std::runtime_error(msg);
+        }
+        std::cout << "[DEBUG] handle_normal_response: http_code=" << http_code << std::endl;
+        if (http_code <= 0) {
+            // should not happen if rc == OK, but keep consistent
             res.status = 502;
+            res.set_header("Content-Type", "application/json; charset=utf-8");
             nlohmann::json err;
-            err["error"] = "Upstream connection failed";
+            err["error"] = "Upstream request failed";
+            err["detail"] = "No HTTP status";
             res.body = err.dump();
             return;
         }
 
-        // 透传上游状态码与响应体
-        res.status = r->status;
-        auto ct_it = r->headers.find("Content-Type");
-        if (ct_it != r->headers.end()) {
-            res.set_header("Content-Type", ct_it->second.c_str());
+        // 原封返回上游：status + body + Content-Type（如果上游没给就默认 json）
+        res.status = (int)http_code;
+        if (!upstream_content_type.empty()) {
+            res.set_header("Content-Type", upstream_content_type.c_str());
         } else {
             res.set_header("Content-Type", "application/json; charset=utf-8");
         }
-        res.body = r->body;
+        res.body = response_body;
     } catch (const std::exception& e) {
-        // 兜底：返回 502 + 错误详情（非上游原始体）
         res.set_header("Content-Type", "application/json; charset=utf-8");
         res.status = 502;
         nlohmann::json err;
-        err["error"] = "Proxy error";
+        err["error"] = "Upstream request failed";
         err["detail"] = e.what();
         res.body = err.dump();
     }

@@ -635,6 +635,529 @@ jobs:
           path: build/bin/gpt-linux-arm64
 
 ###############################################################################
+# 1c. Linux RISC-V 64 交叉编译（glibc，全静态，带 libpsl）
+#     - 使用 Debian/Ubuntu cross toolchain：riscv64-linux-gnu
+###############################################################################
+  build-linux-riscv64:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TARGET_TRIPLE: riscv64-linux-gnu
+      REPO_DEPS_DIR: third_party/prebuilt/static/linux-riscv64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install cross toolchain (riscv64-linux-gnu)
+        shell: bash
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y \
+            make perl wget tar xz-utils cmake \
+            pkg-config autoconf automake libtool \
+            gcc-riscv64-linux-gnu g++-riscv64-linux-gnu \
+            libc6-dev-riscv64-cross
+
+      - name: Use repo prebuilt deps if present (Linux riscv64)
+        id: deps_cache
+        shell: bash
+        run: |
+          set -e
+          repo="$PWD/${REPO_DEPS_DIR}"
+
+          if [ -d "$repo/include" ] && [ -d "$repo/lib" ]; then
+            echo "Using cached deps from repo: $repo"
+            echo "DEPS_PREFIX=$repo" >> $GITHUB_ENV
+            echo "use_cache=true" >> $GITHUB_OUTPUT
+          else
+            build="$PWD/third_party/prefix/static/linux-riscv64"
+            echo "No cached deps found; will build deps into: $build"
+            echo "DEPS_PREFIX=$build" >> $GITHUB_ENV
+            echo "use_cache=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build static deps from source (Linux riscv64 cross)
+        if: steps.deps_cache.outputs.use_cache != 'true'
+        shell: bash
+        run: |
+          set -e
+          TARGET="${TARGET_TRIPLE}"
+          PREFIX="$DEPS_PREFIX"
+
+          rm -rf "$PREFIX"
+          mkdir -p "$PREFIX"
+
+          export CC="${TARGET}-gcc"
+          export CXX="${TARGET}-g++"
+          export AR="${TARGET}-ar"
+          export RANLIB="${TARGET}-ranlib"
+          export STRIP="${TARGET}-strip"
+
+          export PKG_CONFIG="pkg-config --static"
+          export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig"
+          export CPPFLAGS="-I$PREFIX/include"
+          export LDFLAGS="-static -L$PREFIX/lib -L$PREFIX/lib64"
+
+          mkdir -p deps && cd deps
+
+          # zstd (static only)
+          wget -q https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+          tar -zxf zstd-1.5.7.tar.gz
+          cd zstd-1.5.7
+          make -C lib -j"$(nproc)" CC="$CC" CXX="$CXX" libzstd.a
+          make -C lib PREFIX="$PREFIX" install-static install-pc install-includes
+          cd ..
+
+          # zlib
+          wget -q https://zlib.net/fossils/zlib-1.3.1.tar.gz
+          tar -zxf zlib-1.3.1.tar.gz
+          cd zlib-1.3.1
+          CC="$CC" ./configure --static --prefix="$PREFIX"
+          make -j"$(nproc)"
+          make install
+          cd ..
+
+          # OpenSSL (static)
+          wget -q https://github.com/openssl/openssl/releases/download/openssl-3.5.3/openssl-3.5.3.tar.gz
+          tar -zxf openssl-3.5.3.tar.gz
+          cd openssl-3.5.3
+          ./Configure linux64-riscv64 no-shared --prefix="$PREFIX" --cross-compile-prefix="${TARGET}-"
+          make -j"$(nproc)"
+          make install_sw
+          cd ..
+
+          # sqlite3
+          wget -q https://www.sqlite.org/2025/sqlite-autoconf-3500400.tar.gz
+          tar -zxf sqlite-autoconf-3500400.tar.gz
+          cd sqlite-autoconf-3500400
+          ./configure --host="$TARGET" --disable-shared --enable-static --prefix="$PREFIX"
+          make -j"$(nproc)"
+          make install
+          cd ..
+
+          # nghttp2
+          wget -q https://github.com/nghttp2/nghttp2/releases/download/v1.67.1/nghttp2-1.67.1.tar.xz
+          tar -xf nghttp2-1.67.1.tar.xz
+          cd nghttp2-1.67.1
+          autoreconf -i
+          ./configure --host="$TARGET" --disable-shared --enable-static --prefix="$PREFIX"
+          make -j"$(nproc)"
+          make install
+          cd ..
+
+          # libunistring → libidn2 → libpsl
+          wget -q https://ftp.gnu.org/gnu/libunistring/libunistring-1.2.tar.xz
+          tar -xf libunistring-1.2.tar.xz
+          cd libunistring-1.2
+          ./configure --host="$TARGET" --disable-shared --enable-static --prefix="$PREFIX"
+          make -j"$(nproc)"
+          make install
+          cd ..
+
+          # generate libunistring.pc
+          mkdir -p "$PREFIX/lib/pkgconfig" "$PREFIX/lib64/pkgconfig"
+          cat > "$PREFIX/lib/pkgconfig/libunistring.pc" <<EOF
+          prefix=$PREFIX
+          exec_prefix=\${prefix}
+          libdir=\${exec_prefix}/lib
+          includedir=\${exec_prefix}/include
+          Name: libunistring
+          Description: Unicode string library
+          Version: 1.2
+          Libs: -L\${libdir} -lunistring
+          Cflags: -I\${includedir}
+          EOF
+          cp "$PREFIX/lib/pkgconfig/libunistring.pc" "$PREFIX/lib64/pkgconfig/" || true
+
+          wget -q https://ftp.gnu.org/gnu/libidn/libidn2-2.3.7.tar.gz
+          tar -zxf libidn2-2.3.7.tar.gz
+          cd libidn2-2.3.7
+          ./configure --host="$TARGET" --disable-shared --enable-static --prefix="$PREFIX"
+          make -j"$(nproc)"
+          make install
+          cd ..
+
+          wget -q https://github.com/rockdaboot/libpsl/releases/download/0.21.5/libpsl-0.21.5.tar.gz
+          tar -zxf libpsl-0.21.5.tar.gz
+          cd libpsl-0.21.5
+          ./configure --host="$TARGET" --disable-shared --enable-static --disable-icu --enable-runtime=libidn2 --prefix="$PREFIX"
+          make -j"$(nproc)"
+          make install
+          cd ..
+
+          pc="$PREFIX/lib/pkgconfig/libpsl.pc"
+          if [ -f "$pc" ]; then
+            sed -i '/^Requires.private:/d' "$pc" || true
+            sed -i '/^Libs:/a Requires.private: libidn2 libunistring' "$pc" || true
+          fi
+          cp -a "$PREFIX/lib/pkgconfig/"*.pc "$PREFIX/lib64/pkgconfig/" 2>/dev/null || true
+
+          # curl (static)
+          wget -q https://curl.se/download/curl-8.16.0.tar.xz
+          tar -xf curl-8.16.0.tar.xz
+          cd curl-8.16.0
+          ./configure --host="$TARGET" --disable-shared --enable-static \
+                      --with-ssl="$PREFIX" \
+                      --with-zlib="$PREFIX" \
+                      --with-nghttp2="$PREFIX" \
+                      --with-zstd="$PREFIX" \
+                      --with-libpsl \
+                      --without-brotli \
+                      --disable-ldap --disable-ldaps \
+                      --prefix="$PREFIX"
+          make -j"$(nproc)"
+          make install
+          cd ../..
+
+      - name: Header-only libs (Linux riscv64)
+        shell: bash
+        run: |
+          set -e
+          PREFIX="$DEPS_PREFIX"
+          mkdir -p "$PREFIX/include/nlohmann"
+          rm -rf cpp-httplib json || true
+          git clone --depth=1 https://github.com/yhirose/cpp-httplib.git
+          cp cpp-httplib/httplib.h "$PREFIX/include/"
+          git clone --depth=1 https://github.com/nlohmann/json.git
+          cp json/single_include/nlohmann/json.hpp "$PREFIX/include/nlohmann/"
+
+      - name: Save prebuilt deps to repo (git commit/push) (Linux riscv64)
+        if: steps.deps_cache.outputs.use_cache != 'true' && github.event_name == 'push'
+        shell: bash
+        run: |
+          set -e
+          src="$DEPS_PREFIX"
+          dst="$PWD/${REPO_DEPS_DIR}"
+
+          rm -rf "$dst"
+          mkdir -p "$(dirname "$dst")"
+          cp -R "$src" "$dst"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout "$GITHUB_REF_NAME"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+
+          git add "$REPO_DEPS_DIR"
+          if git diff --cached --quiet; then
+            echo "No deps changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: update prebuilt deps (linux-riscv64-static)"
+          for i in 1 2 3; do
+            git push origin "HEAD:$GITHUB_REF_NAME" && break
+            echo "git push failed, retry with fetch+rebase... attempt=$i"
+            git fetch origin "$GITHUB_REF_NAME"
+            git rebase "origin/$GITHUB_REF_NAME"
+            if [ "$i" = "3" ]; then
+              echo "git push failed after retries" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build (Linux riscv64 static, cross)
+        shell: bash
+        run: |
+          set -e
+          TARGET="${TARGET_TRIPLE}"
+          PREFIX="$DEPS_PREFIX"
+
+          export PKG_CONFIG="pkg-config --static"
+          export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig"
+
+          mkdir -p build/obj build/bin
+
+          INC_FLAGS="-I$PREFIX/include"
+          LIB_FLAGS="-static -L$PREFIX/lib -L$PREFIX/lib64"
+
+          for cpp_file in src/main/cpp/*.cpp; do
+            obj_file="build/obj/$(basename ${cpp_file%.cpp}).o"
+            ${TARGET}-g++ -std=c++20 -O3 -Wall -Wextra -DCPPHTTPLIB_OPENSSL_SUPPORT \
+              $INC_FLAGS \
+              -c "$cpp_file" -o "$obj_file"
+          done
+
+          ${TARGET}-g++ build/obj/*.o -o build/bin/gpt-linux-riscv64 \
+            -static -static-libgcc -static-libstdc++ \
+            $LIB_FLAGS \
+            -lcurl -lpsl -lidn2 -lunistring \
+            -lssl -lcrypto -lsqlite3 -lnghttp2 -lzstd -lz \
+            -lresolv -lpthread -ldl
+
+          ${TARGET}-strip build/bin/gpt-linux-riscv64 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpt-linux-riscv64-static
+          path: build/bin/gpt-linux-riscv64
+
+###############################################################################
+# 1d. Linux MIPS64EL 交叉编译（glibc，全静态，带 libpsl）
+#     - 使用 Debian/Ubuntu cross toolchain：mips64el-linux-gnuabi64
+###############################################################################
+  build-linux-mips64el:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TARGET_TRIPLE: mips64el-linux-gnuabi64
+      REPO_DEPS_DIR: third_party/prebuilt/static/linux-mips64el
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install cross toolchain (mips64el-linux-gnuabi64)
+        shell: bash
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y \
+            make perl wget tar xz-utils cmake \
+            pkg-config autoconf automake libtool \
+            gcc-mips64el-linux-gnuabi64 g++-mips64el-linux-gnuabi64 \
+            libc6-dev-mips64el-cross
+
+      - name: Use repo prebuilt deps if present (Linux mips64el)
+        id: deps_cache
+        shell: bash
+        run: |
+          set -e
+          repo="$PWD/${REPO_DEPS_DIR}"
+
+          if [ -d "$repo/include" ] && [ -d "$repo/lib" ]; then
+            echo "Using cached deps from repo: $repo"
+            echo "DEPS_PREFIX=$repo" >> $GITHUB_ENV
+            echo "use_cache=true" >> $GITHUB_OUTPUT
+          else
+            build="$PWD/third_party/prefix/static/linux-mips64el"
+            echo "No cached deps found; will build deps into: $build"
+            echo "DEPS_PREFIX=$build" >> $GITHUB_ENV
+            echo "use_cache=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build static deps from source (Linux mips64el cross)
+        if: steps.deps_cache.outputs.use_cache != 'true'
+        shell: bash
+        run: |
+          set -e
+          TARGET="${TARGET_TRIPLE}"
+          PREFIX="$DEPS_PREFIX"
+
+          rm -rf "$PREFIX"
+          mkdir -p "$PREFIX"
+
+          export CC="${TARGET}-gcc"
+          export CXX="${TARGET}-g++"
+          export AR="${TARGET}-ar"
+          export RANLIB="${TARGET}-ranlib"
+          export STRIP="${TARGET}-strip"
+
+          export PKG_CONFIG="pkg-config --static"
+          export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig"
+          export CPPFLAGS="-I$PREFIX/include"
+          export LDFLAGS="-static -L$PREFIX/lib -L$PREFIX/lib64"
+
+          mkdir -p deps && cd deps
+
+          # zstd (static only)
+          wget -q https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+          tar -zxf zstd-1.5.7.tar.gz
+          cd zstd-1.5.7
+          make -C lib -j"$(nproc)" CC="$CC" CXX="$CXX" libzstd.a
+          make -C lib PREFIX="$PREFIX" install-static install-pc install-includes
+          cd ..
+
+          # zlib
+          wget -q https://zlib.net/fossils/zlib-1.3.1.tar.gz
+          tar -zxf zlib-1.3.1.tar.gz
+          cd zlib-1.3.1
+          CC="$CC" ./configure --static --prefix="$PREFIX"
+          make -j"$(nproc)"
+          make install
+          cd ..
+
+          # OpenSSL (static)
+          wget -q https://github.com/openssl/openssl/releases/download/openssl-3.5.3/openssl-3.5.3.tar.gz
+          tar -zxf openssl-3.5.3.tar.gz
+          cd openssl-3.5.3
+          ./Configure linux64-mips64 no-shared --prefix="$PREFIX" --cross-compile-prefix="${TARGET}-"
+          make -j"$(nproc)"
+          make install_sw
+          cd ..
+
+          # sqlite3
+          wget -q https://www.sqlite.org/2025/sqlite-autoconf-3500400.tar.gz
+          tar -zxf sqlite-autoconf-3500400.tar.gz
+          cd sqlite-autoconf-3500400
+          ./configure --host="$TARGET" --disable-shared --enable-static --prefix="$PREFIX"
+          make -j"$(nproc)"
+          make install
+          cd ..
+
+          # nghttp2
+          wget -q https://github.com/nghttp2/nghttp2/releases/download/v1.67.1/nghttp2-1.67.1.tar.xz
+          tar -xf nghttp2-1.67.1.tar.xz
+          cd nghttp2-1.67.1
+          autoreconf -i
+          ./configure --host="$TARGET" --disable-shared --enable-static --prefix="$PREFIX"
+          make -j"$(nproc)"
+          make install
+          cd ..
+
+          # libunistring → libidn2 → libpsl
+          wget -q https://ftp.gnu.org/gnu/libunistring/libunistring-1.2.tar.xz
+          tar -xf libunistring-1.2.tar.xz
+          cd libunistring-1.2
+          ./configure --host="$TARGET" --disable-shared --enable-static --prefix="$PREFIX"
+          make -j"$(nproc)"
+          make install
+          cd ..
+
+          mkdir -p "$PREFIX/lib/pkgconfig" "$PREFIX/lib64/pkgconfig"
+          cat > "$PREFIX/lib/pkgconfig/libunistring.pc" <<EOF
+          prefix=$PREFIX
+          exec_prefix=\${prefix}
+          libdir=\${exec_prefix}/lib
+          includedir=\${exec_prefix}/include
+          Name: libunistring
+          Description: Unicode string library
+          Version: 1.2
+          Libs: -L\${libdir} -lunistring
+          Cflags: -I\${includedir}
+          EOF
+          cp "$PREFIX/lib/pkgconfig/libunistring.pc" "$PREFIX/lib64/pkgconfig/" || true
+
+          wget -q https://ftp.gnu.org/gnu/libidn/libidn2-2.3.7.tar.gz
+          tar -zxf libidn2-2.3.7.tar.gz
+          cd libidn2-2.3.7
+          ./configure --host="$TARGET" --disable-shared --enable-static --prefix="$PREFIX"
+          make -j"$(nproc)"
+          make install
+          cd ..
+
+          wget -q https://github.com/rockdaboot/libpsl/releases/download/0.21.5/libpsl-0.21.5.tar.gz
+          tar -zxf libpsl-0.21.5.tar.gz
+          cd libpsl-0.21.5
+          ./configure --host="$TARGET" --disable-shared --enable-static --disable-icu --enable-runtime=libidn2 --prefix="$PREFIX"
+          make -j"$(nproc)"
+          make install
+          cd ..
+
+          pc="$PREFIX/lib/pkgconfig/libpsl.pc"
+          if [ -f "$pc" ]; then
+            sed -i '/^Requires.private:/d' "$pc" || true
+            sed -i '/^Libs:/a Requires.private: libidn2 libunistring' "$pc" || true
+          fi
+          cp -a "$PREFIX/lib/pkgconfig/"*.pc "$PREFIX/lib64/pkgconfig/" 2>/dev/null || true
+
+          # curl (static)
+          wget -q https://curl.se/download/curl-8.16.0.tar.xz
+          tar -xf curl-8.16.0.tar.xz
+          cd curl-8.16.0
+          ./configure --host="$TARGET" --disable-shared --enable-static \
+                      --with-ssl="$PREFIX" \
+                      --with-zlib="$PREFIX" \
+                      --with-nghttp2="$PREFIX" \
+                      --with-zstd="$PREFIX" \
+                      --with-libpsl \
+                      --without-brotli \
+                      --disable-ldap --disable-ldaps \
+                      --prefix="$PREFIX"
+          make -j"$(nproc)"
+          make install
+          cd ../..
+
+      - name: Header-only libs (Linux mips64el)
+        shell: bash
+        run: |
+          set -e
+          PREFIX="$DEPS_PREFIX"
+          mkdir -p "$PREFIX/include/nlohmann"
+          rm -rf cpp-httplib json || true
+          git clone --depth=1 https://github.com/yhirose/cpp-httplib.git
+          cp cpp-httplib/httplib.h "$PREFIX/include/"
+          git clone --depth=1 https://github.com/nlohmann/json.git
+          cp json/single_include/nlohmann/json.hpp "$PREFIX/include/nlohmann/"
+
+      - name: Save prebuilt deps to repo (git commit/push) (Linux mips64el)
+        if: steps.deps_cache.outputs.use_cache != 'true' && github.event_name == 'push'
+        shell: bash
+        run: |
+          set -e
+          src="$DEPS_PREFIX"
+          dst="$PWD/${REPO_DEPS_DIR}"
+
+          rm -rf "$dst"
+          mkdir -p "$(dirname "$dst")"
+          cp -R "$src" "$dst"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout "$GITHUB_REF_NAME"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+
+          git add "$REPO_DEPS_DIR"
+          if git diff --cached --quiet; then
+            echo "No deps changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: update prebuilt deps (linux-mips64el-static)"
+          for i in 1 2 3; do
+            git push origin "HEAD:$GITHUB_REF_NAME" && break
+            echo "git push failed, retry with fetch+rebase... attempt=$i"
+            git fetch origin "$GITHUB_REF_NAME"
+            git rebase "origin/$GITHUB_REF_NAME"
+            if [ "$i" = "3" ]; then
+              echo "git push failed after retries" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build (Linux mips64el static, cross)
+        shell: bash
+        run: |
+          set -e
+          TARGET="${TARGET_TRIPLE}"
+          PREFIX="$DEPS_PREFIX"
+
+          export PKG_CONFIG="pkg-config --static"
+          export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig"
+
+          mkdir -p build/obj build/bin
+
+          INC_FLAGS="-I$PREFIX/include"
+          LIB_FLAGS="-static -L$PREFIX/lib -L$PREFIX/lib64"
+
+          for cpp_file in src/main/cpp/*.cpp; do
+            obj_file="build/obj/$(basename ${cpp_file%.cpp}).o"
+            ${TARGET}-g++ -std=c++20 -O3 -Wall -Wextra -DCPPHTTPLIB_OPENSSL_SUPPORT \
+              $INC_FLAGS \
+              -c "$cpp_file" -o "$obj_file"
+          done
+
+          ${TARGET}-g++ build/obj/*.o -o build/bin/gpt-linux-mips64el \
+            -static -static-libgcc -static-libstdc++ \
+            $LIB_FLAGS \
+            -lcurl -lpsl -lidn2 -lunistring \
+            -lssl -lcrypto -lsqlite3 -lnghttp2 -lzstd -lz \
+            -lresolv -lpthread -ldl
+
+          ${TARGET}-strip build/bin/gpt-linux-mips64el || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpt-linux-mips64el-static
+          path: build/bin/gpt-linux-mips64el
+
+###############################################################################
 # 2. Windows x86_64 交叉编译（MinGW，全静态）
 ###############################################################################
   build-windows:
@@ -1545,7 +2068,7 @@ jobs:
 # 3. GitHub Release（打包六平台产物：Linux x64/arm64、Windows x64/arm64、macOS x64/arm64）
 ###############################################################################
   release:
-    needs: [build-linux, build-linux-arm64, build-windows, build-windows-arm64, build-macos-x64, build-macos-arm64]
+    needs: [build-linux, build-linux-arm64, build-linux-riscv64, build-linux-mips64el, build-windows, build-windows-arm64, build-macos-x64, build-macos-arm64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1557,6 +2080,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: gpt-linux-arm64-static
+          path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: gpt-linux-riscv64-static
+          path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: gpt-linux-mips64el-static
           path: dist/
       - uses: actions/download-artifact@v4
         with:
@@ -1587,6 +2118,8 @@ jobs:
           files: |
             dist/gpt-linux-x64
             dist/gpt-linux-arm64
+            dist/gpt-linux-riscv64
+            dist/gpt-linux-mips64el
             dist/gpt-windows-x64.exe
             dist/gpt-windows-arm64.exe
             dist/gpt-macos-x64.zip

@@ -47,8 +47,10 @@ private:
     std::string build_usage_sse_chunk(const std::string& convo_id, int prompt_tokens, int completion_tokens, int total_tokens, const std::string& system_fingerprint);
 
     // 流式和普通响应处理
-    void handle_stream_response(const httplib::Request& req, httplib::Response& res, bool need_usage_chunk);
-    void handle_normal_response(const httplib::Request& req, httplib::Response& res);
+    // 重要：必须使用“预处理后的 request body”（图片转 data:、合并 text、必要时追加空 user），
+    // 不能直接用原始 req.body，否则行为会与 Java 版本不一致。
+    void handle_stream_response(const std::string& request_body, httplib::Response& res, bool need_usage_chunk);
+    void handle_normal_response(const std::string& request_body, httplib::Response& res);
 
     // 线程安全相关
     std::mutex token_mutex_;
