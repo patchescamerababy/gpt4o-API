@@ -669,15 +669,24 @@ jobs:
         run: |
           set -e
           repo="$PWD/${REPO_DEPS_DIR}"
-          # 必须同时具备 OpenSSL 静态库，否则最终链接会失败（-lssl/-lcrypto not found）
-          if [ -d "$repo/include" ] && [ -d "$repo/lib" ] \
-            && [ -f "$repo/lib/libcurl.a" ] \
-            && [ -f "$repo/lib/libssl.a" ] \
-            && [ -f "$repo/lib/libcrypto.a" ]; then
+
+          # 说明：该 job 最终链接必须能找到 -lssl/-lcrypto
+          # OpenSSL 有时会把库装到 lib64/，所以这里同时检查 lib/ 与 lib64/
+          ssl_ok=false
+          if [ -f "$repo/lib/libssl.a" ] && [ -f "$repo/lib/libcrypto.a" ]; then
+            ssl_ok=true
+          elif [ -f "$repo/lib64/libssl.a" ] && [ -f "$repo/lib64/libcrypto.a" ]; then
+            ssl_ok=true
+          fi
+
+          if [ -d "$repo/include" ] && [ -f "$repo/lib/libcurl.a" ] && [ "$ssl_ok" = "true" ]; then
             echo "Using cached deps from repo: $repo"
-            sudo mkdir -p "$PREFIX"
+            sudo mkdir -p "$PREFIX/include" "$PREFIX/lib" "$PREFIX/lib64"
             sudo cp -R "$repo/include/." "$PREFIX/include/" || true
             sudo cp -R "$repo/lib/." "$PREFIX/lib/" || true
+            if [ -d "$repo/lib64" ]; then
+              sudo cp -R "$repo/lib64/." "$PREFIX/lib64/" || true
+            fi
             echo "use_cache=true" >> $GITHUB_OUTPUT
           else
             echo "No cached deps found; will build deps."
@@ -710,6 +719,21 @@ jobs:
           cd openssl-${OPENSSL_VER}
           CC=$CC ./Configure mingw64 no-shared no-tests --prefix=$PREFIX --openssldir=$PREFIX/ssl
           make -j$(nproc); sudo make install_sw
+
+          # 有些环境会把库装到 lib64/；兜底创建并展示实际产物位置
+          sudo mkdir -p "$PREFIX/lib" "$PREFIX/lib64"
+          echo "OpenSSL installed libs:"
+          find "$PREFIX" -maxdepth 3 -type f \( -name "libssl*.a" -o -name "libcrypto*.a" \) -print || true
+
+          # 强校验：不满足就立刻失败（避免最后链接阶段才报 cannot find -lssl/-lcrypto）
+          if [ ! -f "$PREFIX/lib/libssl.a" ] && [ ! -f "$PREFIX/lib64/libssl.a" ]; then
+            echo "ERROR: OpenSSL libssl.a not found under $PREFIX/lib or $PREFIX/lib64" >&2
+            exit 1
+          fi
+          if [ ! -f "$PREFIX/lib/libcrypto.a" ] && [ ! -f "$PREFIX/lib64/libcrypto.a" ]; then
+            echo "ERROR: OpenSSL libcrypto.a not found under $PREFIX/lib or $PREFIX/lib64" >&2
+            exit 1
+          fi
           cd ..
           # SQLite3
           wget -q https://www.sqlite.org/2024/sqlite-autoconf-3450200.tar.gz
@@ -777,6 +801,14 @@ jobs:
           # 只拷贝 include/lib（必要文件），并确保归属正确
           sudo cp -R "$PREFIX/include/." "$dst/include/" || true
           sudo cp -R "$PREFIX/lib/." "$dst/lib/" || true
+          # 如果 OpenSSL 装到了 lib64/，也一并保存
+          if [ -d "$PREFIX/lib64" ]; then
+            mkdir -p "$dst/lib64"
+            sudo cp -R "$PREFIX/lib64/." "$dst/lib64/" || true
+          fi
+          # 兜底：确保 repo 缓存里不混入 Linux so
+          find "$dst/lib" -maxdepth 1 -name "*.so*" -delete 2>/dev/null || true
+
           sudo chown -R "$USER":"$USER" "$dst"
 
           git add "$REPO_DEPS_DIR"
@@ -802,7 +834,7 @@ jobs:
           mkdir -p build/obj build/bin
 
           INC_FLAGS="-I$PREFIX/include"
-          LIB_FLAGS="-L$PREFIX/lib"
+          LIB_FLAGS="-L$PREFIX/lib -L$PREFIX/lib64"
           
           for cpp_file in src/main/cpp/*.cpp; do
             obj_file="build/obj/$(basename ${cpp_file%.cpp}).o"
