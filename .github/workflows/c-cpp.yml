@@ -280,6 +280,7 @@ jobs:
           set -e
       
           # 确保使用我们编译的库，而不是系统库
+          export PKG_CONFIG="pkg-config --static"
           export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig"
           export LD_LIBRARY_PATH="/usr/local/lib64:/usr/local/lib:$LD_LIBRARY_PATH"
       
@@ -588,7 +589,7 @@ jobs:
               -c "$cpp_file" -o "$obj_file"
           done
 
-          "$CXX" build/obj/*.o -o build/bin/gpt-arm64 \
+          "$CXX" build/obj/*.o -o build/bin/gpt-linux-arm64 \
             -static -static-libgcc -static-libstdc++ \
             $LIB_FLAGS \
             -lcurl -lpsl -lidn2 -lunistring -lssl -lcrypto -lsqlite3 -lnghttp2 -lzstd -lz -lresolv -lpthread -ldl
@@ -780,8 +781,6 @@ jobs:
             -lcurl -lssl -lcrypto -lsqlite3 -lnghttp2 -lzstd -lz
           
           $STRIP build/bin/gpt-windows-x64.exe || true
-
-
 
       - uses: actions/upload-artifact@v4
         with:
@@ -1038,6 +1037,7 @@ jobs:
             $LIB_FLAGS \
             -lws2_32 -lwinmm -lcrypt32 -lbcrypt -lsecur32 -lwldap32 -liphlpapi -lnormaliz \
             -lcurl -lssl -lcrypto -lsqlite3 -lz
+          aarch64-w64-mingw32-strip build/bin/gpt-windows-arm64.exe || true
 
       - uses: actions/upload-artifact@v4
         with:
