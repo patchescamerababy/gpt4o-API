@@ -669,7 +669,11 @@ jobs:
         run: |
           set -e
           repo="$PWD/${REPO_DEPS_DIR}"
-          if [ -d "$repo/include" ] && [ -d "$repo/lib" ] && [ -f "$repo/lib/libcurl.a" ]; then
+          # 必须同时具备 OpenSSL 静态库，否则最终链接会失败（-lssl/-lcrypto not found）
+          if [ -d "$repo/include" ] && [ -d "$repo/lib" ] \
+            && [ -f "$repo/lib/libcurl.a" ] \
+            && [ -f "$repo/lib/libssl.a" ] \
+            && [ -f "$repo/lib/libcrypto.a" ]; then
             echo "Using cached deps from repo: $repo"
             sudo mkdir -p "$PREFIX"
             sudo cp -R "$repo/include/." "$PREFIX/include/" || true
