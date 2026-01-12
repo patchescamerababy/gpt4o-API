@@ -853,11 +853,6 @@ jobs:
           name: gpt-windows-static
           path: build/bin/gpt-windows-x64.exe
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: gpt-windows-static
-          path: build/bin/gpt-windows-x64.exe
-
 ###############################################################################
 # 2b. Windows ARM64 交叉编译（llvm-mingw，静态依赖 + 静态链接）
 #     - 增加“仓库二进制依赖缓存”：third_party/prebuilt/static/win-arm64-llvm
