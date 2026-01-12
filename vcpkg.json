@@ -1,0 +1,12 @@
+{
+  "name": "chatrun",
+  "version": "1.0.0",
+  "dependencies": [
+    "openssl",
+    "curl",
+    "zlib",
+    "zstd",
+    "nghttp2"
+  ],
+  "builtin-baseline": "c4af3593e1f1aa9e14a560a09e45ea2cb0dfd74d"
+}
