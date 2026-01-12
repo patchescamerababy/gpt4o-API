@@ -48,7 +48,7 @@ WIN_CXXFLAGS := -std=c++20 -O3 -Wall -Wextra \
                 -I$(PREFIX)/include
 
 # ---- 链接阶段 ----
-WIN_LDFLAGS  := -static -static-libgcc -static-libstdc++ -L$(PREFIX)/lib
+WIN_LDFLAGS  := -static -static-libgcc -static-libstdc++ -L$(PREFIX)/lib -L$(PREFIX)/lib64
 WIN_LIBS     := \
   -lcurl -lssl -lcrypto -lsqlite3 -lnghttp2 -lz -lzstd \
   -lwinpthread -lws2_32 -lcrypt32 -lbcrypt -lwinmm -lgdi32
