@@ -50,7 +50,7 @@ WIN_CXXFLAGS := -std=c++20 -O3 -Wall -Wextra \
 # ---- 链接阶段 ----
 WIN_LDFLAGS  := -static -static-libgcc -static-libstdc++ -L$(PREFIX)/lib
 WIN_LIBS     := \
-  -lcurl -lpsl -lidn2 -lunistring -lssl -lcrypto -lsqlite3 -lnghttp2 -lz -lzstd \
+  -lcurl -lssl -lcrypto -lsqlite3 -lnghttp2 -lz -lzstd \
   -lwinpthread -lws2_32 -lcrypt32 -lbcrypt -lwinmm -lgdi32
 
 WIN_TARGET   := $(BIN_DIR)/gpt-windows-x64.exe
