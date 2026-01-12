@@ -318,63 +318,25 @@ jobs:
 #     - 增加“仓库二进制依赖缓存”：third_party/prebuilt/static/linux-arm64
 ###############################################################################
   build-linux-arm64:
-    runs-on: ubuntu-latest
+    # 使用原生 ARM64 Runner（不再交叉编译）
+    # 需要 GitHub Hosted Runner 支持：ubuntu-24.04-arm64
+    runs-on: ubuntu-24.04-arm64
     permissions:
       contents: write
     env:
-      TARGET: aarch64-linux-gnu
-      CC: aarch64-linux-gnu-gcc
-      CXX: aarch64-linux-gnu-g++
-      AR: aarch64-linux-gnu-ar
-      RANLIB: aarch64-linux-gnu-ranlib
-      STRIP: aarch64-linux-gnu-strip
       REPO_DEPS_DIR: third_party/prebuilt/static/linux-arm64
-      BUILD_DEPS_DIR: third_party/prefix/static/linux-arm64
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Install cross toolchain + build tools (Linux ARM64)
+      - name: Install system toolchain (Linux ARM64 native)
+        shell: bash
         run: |
           set -e
-
-          # (参考 dynamic.yml) Ubuntu 24.04 runner 加 arm64 架构后，需修 sources
-          sudo dpkg --add-architecture arm64 || true
-
-          sudo python3 - <<'PY'
-          from pathlib import Path
-          p = Path("/etc/apt/sources.list.d/ubuntu.sources")
-          if p.exists():
-              text = p.read_text()
-              blocks = [b for b in text.strip().split("\n\n") if b.strip()]
-              out_blocks = []
-              for b in blocks:
-                  lines = b.splitlines()
-                  if not any(l.startswith("Architectures:") for l in lines):
-                      new_lines = []
-                      for l in lines:
-                          new_lines.append(l)
-                          if l.startswith("Types:"):
-                              new_lines.append("Architectures: amd64")
-                      lines = new_lines
-                  out_blocks.append("\n".join(lines))
-              p.write_text("\n\n".join(out_blocks) + "\n")
-          PY
-
-          sudo tee /etc/apt/sources.list.d/ubuntu-ports-arm64.list >/dev/null <<'EOF'
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main universe multiverse restricted
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main universe multiverse restricted
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main universe multiverse restricted
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-backports main universe multiverse restricted
-          EOF
-
           sudo apt-get update
-
-          # Cross compiler + build toolchain
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            make perl wget tar xz-utils cmake \
+          sudo apt-get install -y \
+            g++ make perl wget tar xz-utils cmake \
             pkg-config autoconf automake libtool
 
       - name: Use repo prebuilt deps if present (Linux ARM64)
@@ -383,71 +345,87 @@ jobs:
         run: |
           set -e
           repo="$PWD/${REPO_DEPS_DIR}"
-          if [ -d "$repo/include" ] && [ -d "$repo/lib" ] \
-            && [ -f "$repo/lib/libssl.a" ] && [ -f "$repo/lib/libcrypto.a" ] \
-            && [ -f "$repo/lib/libcurl.a" ] && [ -f "$repo/lib/libnghttp2.a" ] \
-            && [ -f "$repo/lib/libpsl.a" ] && [ -f "$repo/lib/libzstd.a" ] \
-            && [ -f "$repo/lib/libz.a" ] && [ -f "$repo/lib/libsqlite3.a" ]; then
+          # 只恢复我们项目需要的 deps（同 x86_64 job 逻辑）
+          if [ -d "$repo/include" ] && [ -d "$repo/lib" ]; then
             echo "Using cached deps from repo: $repo"
-            echo "PREFIX=$repo" >> $GITHUB_ENV
+
+            sudo mkdir -p /usr/local/include /usr/local/lib /usr/local/lib/pkgconfig /usr/local/lib64/pkgconfig
+
+            # headers
+            sudo cp -a "$repo/include/httplib.h" /usr/local/include/ 2>/dev/null || true
+            sudo mkdir -p /usr/local/include/nlohmann
+            sudo cp -a "$repo/include/nlohmann/json.hpp" /usr/local/include/nlohmann/ 2>/dev/null || true
+            sudo mkdir -p /usr/local/include/openssl /usr/local/include/nghttp2
+            sudo cp -a "$repo/include/openssl/." /usr/local/include/openssl/ 2>/dev/null || true
+            sudo cp -a "$repo/include/nghttp2/." /usr/local/include/nghttp2/ 2>/dev/null || true
+            sudo cp -a "$repo/include/curl" /usr/local/include/ 2>/dev/null || true
+            sudo cp -a "$repo/include/sqlite3.h" "$repo/include/sqlite3ext.h" /usr/local/include/ 2>/dev/null || true
+            sudo cp -a "$repo/include/zlib.h" "$repo/include/zconf.h" /usr/local/include/ 2>/dev/null || true
+            sudo cp -a "$repo/include/zstd.h" /usr/local/include/ 2>/dev/null || true
+            sudo cp -a "$repo/include/libpsl.h" /usr/local/include/ 2>/dev/null || true
+
+            # libs
+            sudo cp -a "$repo/lib/." /usr/local/lib/ 2>/dev/null || true
+            if [ -d "$repo/lib64" ]; then
+              sudo mkdir -p /usr/local/lib64
+              sudo cp -a "$repo/lib64/." /usr/local/lib64/ 2>/dev/null || true
+            fi
+
+            # pkg-config
+            if [ -d "$repo/lib/pkgconfig" ]; then
+              sudo cp -a "$repo/lib/pkgconfig/." /usr/local/lib/pkgconfig/ 2>/dev/null || true
+              sudo cp -a "$repo/lib/pkgconfig/." /usr/local/lib64/pkgconfig/ 2>/dev/null || true
+            fi
+
             echo "use_cache=true" >> $GITHUB_OUTPUT
           else
-            build="$PWD/${BUILD_DEPS_DIR}"
-            echo "No cached deps found; will build deps into: $build"
-            echo "PREFIX=$build" >> $GITHUB_ENV
+            echo "No cached deps found; will build deps."
             echo "use_cache=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build static deps (Linux ARM64 cross)
+      - name: Build static dependencies (Linux ARM64 native)
         if: steps.deps_cache.outputs.use_cache != 'true'
         shell: bash
         run: |
           set -e
+          mkdir deps && cd deps
 
-          rm -rf "$PREFIX"
-          mkdir -p "$PREFIX"
-
-          mkdir -p deps && cd deps
-
-          export PKG_CONFIG="pkg-config --static"
-          export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig"
-          export CPPFLAGS="-I$PREFIX/include"
-          export LDFLAGS="-static -L$PREFIX/lib -L$PREFIX/lib64"
-
-          # zstd (static only)
+          # ---------- zstd：仅静态库，避免 __TMC_END__ ----------
           wget -q https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
           tar -zxf zstd-1.5.7.tar.gz
-          cd zstd-1.5.7
-          make -C lib -j"$(nproc)" CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" libzstd.a
-          make -C lib PREFIX="$PREFIX" install-static install-pc
+          cd  zstd-1.5.7
+          make -C lib -j"$(nproc)" libzstd.a
+          sudo make -C lib PREFIX=/usr/local install-static install-pc
           cd ..
+
+          # ---------- 全局静态编译环境 ----------
+          export PKG_CONFIG="pkg-config --static"
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig"
+          export CPPFLAGS="-I/usr/local/include"
+          export LDFLAGS="-static -L/usr/local/lib -L/usr/local/lib64"
 
           # zlib
           wget -q https://zlib.net/fossils/zlib-1.3.1.tar.gz
           tar -zxf zlib-1.3.1.tar.gz
           cd zlib-1.3.1
-          CC="$CC" ./configure --static --prefix="$PREFIX"
-          make -j"$(nproc)"
-          make install
+          ./configure --static --prefix=/usr/local
+          make -j"$(nproc)"; sudo make install
           cd ..
 
           # OpenSSL 3.5.3
-          # 修复：不要同时设置 --cross-compile-prefix + CC=aarch64-linux-gnu-gcc，否则会变成 aarch64-linux-gnu-aarch64-linux-gnu-gcc
           wget -q https://github.com/openssl/openssl/releases/download/openssl-3.5.3/openssl-3.5.3.tar.gz
           tar -zxf openssl-3.5.3.tar.gz
           cd openssl-3.5.3
-          CC="$CC" ./Configure linux-aarch64 no-shared --prefix="$PREFIX"
-          make -j"$(nproc)"
-          make install_sw
+          ./Configure linux-aarch64 no-shared --prefix=/usr/local
+          make -j"$(nproc)"; sudo make install_sw
           cd ..
 
           # SQLite3
           wget -q https://www.sqlite.org/2025/sqlite-autoconf-3500400.tar.gz
           tar -zxf sqlite-autoconf-3500400.tar.gz
           cd sqlite-autoconf-3500400
-          CC="$CC" CXX="$CXX" ./configure --host="$TARGET" --disable-shared --enable-static --prefix="$PREFIX"
-          make -j"$(nproc)"
-          make install
+          ./configure --disable-shared --enable-static --prefix=/usr/local
+          make -j"$(nproc)"; sudo make install
           cd ..
 
           # nghttp2
@@ -455,23 +433,22 @@ jobs:
           tar -xf nghttp2-1.67.1.tar.xz
           cd nghttp2-1.67.1
           autoreconf -i
-          CC="$CC" CXX="$CXX" ./configure --host="$TARGET" --disable-shared --enable-static --prefix="$PREFIX"
-          make -j"$(nproc)"
-          make install
+          ./configure --disable-shared --enable-static --prefix=/usr/local
+          make -j"$(nproc)"; sudo make install
           cd ..
 
-          # libunistring - generate .pc manually like x86_64 job
+          # ---------- libunistring → libidn2 → libpsl ----------
           wget -q https://ftp.gnu.org/gnu/libunistring/libunistring-1.2.tar.xz
           tar -xf libunistring-1.2.tar.xz
           cd libunistring-1.2
-          CC="$CC" CXX="$CXX" ./configure --host="$TARGET" --disable-shared --enable-static --prefix="$PREFIX"
-          make -j"$(nproc)"
-          make install
+          ./configure --disable-shared --enable-static --prefix=/usr/local
+          make -j"$(nproc)"; sudo make install
           cd ..
 
-          mkdir -p "$PREFIX/lib/pkgconfig"
-          cat > "$PREFIX/lib/pkgconfig/libunistring.pc" <<EOF
-          prefix=$PREFIX
+          # 生成 libunistring.pc（上游不自带）
+          sudo mkdir -p /usr/local/lib/pkgconfig
+          sudo tee /usr/local/lib/pkgconfig/libunistring.pc >/dev/null <<EOF
+          prefix=/usr/local
           exec_prefix=\${prefix}
           libdir=\${exec_prefix}/lib
           includedir=\${exec_prefix}/include
@@ -481,62 +458,122 @@ jobs:
           Libs: -L\${libdir} -lunistring
           Cflags: -I\${includedir}
           EOF
+          sudo mkdir -p /usr/local/lib64/pkgconfig
+          sudo cp /usr/local/lib/pkgconfig/libunistring.pc /usr/local/lib64/pkgconfig/
 
-          # libidn2
           wget -q https://ftp.gnu.org/gnu/libidn/libidn2-2.3.7.tar.gz
           tar -zxf libidn2-2.3.7.tar.gz
           cd libidn2-2.3.7
-          CC="$CC" CXX="$CXX" ./configure --host="$TARGET" --disable-shared --enable-static --prefix="$PREFIX"
-          make -j"$(nproc)"
-          make install
+          ./configure --disable-shared --enable-static --prefix=/usr/local
+          make -j"$(nproc)"; sudo make install
           cd ..
 
-          # libpsl
           wget -q https://github.com/rockdaboot/libpsl/releases/download/0.21.5/libpsl-0.21.5.tar.gz
           tar -zxf libpsl-0.21.5.tar.gz
           cd libpsl-0.21.5
-          CC="$CC" CXX="$CXX" ./configure --host="$TARGET" --disable-shared --enable-static --disable-icu --enable-runtime=libidn2 --prefix="$PREFIX"
-          make -j"$(nproc)"
-          make install
+          ./configure --disable-shared --enable-static --disable-icu --enable-runtime=libidn2 --prefix=/usr/local
+          make -j"$(nproc)"; sudo make install
           cd ..
 
-          # 修复 libpsl.pc 依赖
-          pc="$PREFIX/lib/pkgconfig/libpsl.pc"
-          sed -i '/^Requires.private:/d' "$pc" || true
-          sed -i '/^Libs:/a Requires.private: libidn2 libunistring' "$pc" || true
+          # ---------- 修复 libpsl.pc，确保包含所有依赖 ----------
+          pc=/usr/local/lib/pkgconfig/libpsl.pc
+          sudo sed -i '/^Requires.private:/d' "$pc"
+          sudo sed -i '/^Libs:/a Requires.private: libidn2 libunistring' "$pc"
           if ! grep -q -- '-lidn2' "$pc"; then
-            sed -i 's|^Libs:.*|& -lidn2 -lunistring|' "$pc" || true
+            sudo sed -i 's|^Libs:.*|& -lidn2 -lunistring|' "$pc"
           fi
 
-          # curl 8.16.0 (static)
+          # ---------- 复制 .pc 文件到 lib64，curl configure 会强制搜索这里 ----------
+          sudo mkdir -p /usr/local/lib64/pkgconfig
+          sudo cp /usr/local/lib/pkgconfig/*.pc /usr/local/lib64/pkgconfig/
+
+          # ---------- 验证 pkg-config ----------
+          echo "libpsl cflags : $(pkg-config --cflags libpsl)"
+          echo "libpsl libs   : $(pkg-config --static --libs libpsl)"
+
+          # ---------- 手动验证链接测试 ----------
+          echo '#include <libpsl.h>' > test_libpsl.c
+          echo 'int main() { psl_builtin(); return 0; }' >> test_libpsl.c
+          if gcc -static test_libpsl.c $(pkg-config --static --libs libpsl) $(pkg-config --cflags libpsl) -o test_libpsl; then
+            echo "✓ libpsl links successfully"
+            ./test_libpsl && echo "✓ libpsl test runs successfully"
+          else
+            echo "✗ libpsl linking failed"
+            exit 1
+          fi
+
+          # ---------- 设置 curl 构建环境，使用 pkg-config --static ----------
+          export CPPFLAGS="$CPPFLAGS $($PKG_CONFIG --cflags libpsl)"
+          export LIBS="$($PKG_CONFIG --libs libpsl) $LIBS"
+
+          # curl 8.16.0 全静态
           wget -q https://curl.se/download/curl-8.16.0.tar.xz
           tar -xf curl-8.16.0.tar.xz
           cd curl-8.16.0
 
-          ./configure --host="$TARGET" --disable-shared --enable-static \
-                      --with-ssl="$PREFIX" \
-                      --with-zlib="$PREFIX" \
-                      --with-nghttp2="$PREFIX" \
-                      --with-zstd="$PREFIX" \
+          ./configure --disable-shared --enable-static \
+                      --with-ssl=/usr/local \
+                      --with-zlib=/usr/local \
+                      --with-nghttp2=/usr/local \
+                      --with-zstd=/usr/local \
                       --with-libpsl \
                       --without-brotli \
                       --disable-ldap --disable-ldaps \
-                      --prefix="$PREFIX"
-          make -j"$(nproc)"
-          make install
-          cd ..
+                      --prefix=/usr/local
+          make -j"$(nproc)"; sudo make install
+          cd ../..
+
+      - name: Header-only libs (Linux ARM64)
+        shell: bash
+        run: |
+          sudo mkdir -p /usr/local/include/nlohmann
+          git clone --depth=1 https://github.com/yhirose/cpp-httplib.git
+          sudo cp cpp-httplib/httplib.h /usr/local/include/
+          git clone --depth=1 https://github.com/nlohmann/json.git
+          sudo cp json/single_include/nlohmann/json.hpp /usr/local/include/nlohmann/
 
       - name: Save prebuilt deps to repo (git commit/push) (Linux ARM64)
         if: steps.deps_cache.outputs.use_cache != 'true' && github.event_name == 'push'
         shell: bash
         run: |
           set -e
-          src="$PREFIX"
           dst="$PWD/${REPO_DEPS_DIR}"
 
           rm -rf "$dst"
-          mkdir -p "$(dirname "$dst")"
-          cp -R "$src" "$dst"
+          mkdir -p "$dst/include" "$dst/lib" "$dst/lib/pkgconfig"
+
+          # headers
+          sudo cp -a /usr/local/include/httplib.h "$dst/include/" 2>/dev/null || true
+          sudo mkdir -p "$dst/include/nlohmann"
+          sudo cp -a /usr/local/include/nlohmann/json.hpp "$dst/include/nlohmann/" 2>/dev/null || true
+          sudo mkdir -p "$dst/include/openssl" "$dst/include/nghttp2"
+          sudo cp -a /usr/local/include/openssl/. "$dst/include/openssl/" 2>/dev/null || true
+          sudo cp -a /usr/local/include/nghttp2/. "$dst/include/nghttp2/" 2>/dev/null || true
+          sudo cp -a /usr/local/include/curl "$dst/include/" 2>/dev/null || true
+          sudo cp -a /usr/local/include/sqlite3.h /usr/local/include/sqlite3ext.h "$dst/include/" 2>/dev/null || true
+          sudo cp -a /usr/local/include/zlib.h /usr/local/include/zconf.h "$dst/include/" 2>/dev/null || true
+          sudo cp -a /usr/local/include/zstd.h "$dst/include/" 2>/dev/null || true
+          sudo cp -a /usr/local/include/libpsl.h "$dst/include/" 2>/dev/null || true
+
+          # libs
+          for f in \
+            libcurl.a libssl.a libcrypto.a libsqlite3.a libnghttp2.a libzstd.a libz.a \
+            libpsl.a libidn2.a libunistring.a; do
+            if [ -f "/usr/local/lib/$f" ]; then
+              sudo cp -a "/usr/local/lib/$f" "$dst/lib/"
+            fi
+            if [ -f "/usr/local/lib64/$f" ]; then
+              mkdir -p "$dst/lib64"
+              sudo cp -a "/usr/local/lib64/$f" "$dst/lib64/"
+            fi
+          done
+
+          # pkg-config
+          if [ -d /usr/local/lib/pkgconfig ]; then
+            sudo cp -a /usr/local/lib/pkgconfig/*.pc "$dst/lib/pkgconfig/" 2>/dev/null || true
+          fi
+
+          sudo chown -R "$USER":"$USER" "$dst"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -562,39 +599,35 @@ jobs:
             fi
           done
 
-      - name: Header-only libs (Linux ARM64)
+      - name: Build (Linux ARM64 static, native)
         shell: bash
         run: |
           set -e
-          mkdir -p "$PREFIX/include/nlohmann"
-          rm -rf cpp-httplib json || true
-          git clone --depth=1 https://github.com/yhirose/cpp-httplib.git
-          cp cpp-httplib/httplib.h "$PREFIX/include/"
-          git clone --depth=1 https://github.com/nlohmann/json.git
-          cp json/single_include/nlohmann/json.hpp "$PREFIX/include/nlohmann/"
 
-      - name: Build (Linux ARM64 static cross)
-        shell: bash
-        run: |
-          set -e
+          export PKG_CONFIG="pkg-config --static"
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig"
+          export LD_LIBRARY_PATH="/usr/local/lib64:/usr/local/lib:$LD_LIBRARY_PATH"
+
           mkdir -p build/obj build/bin
 
-          INC_FLAGS="-I$PREFIX/include"
-          LIB_FLAGS="-static -L$PREFIX/lib -L$PREFIX/lib64"
+          INC_FLAGS="-I/usr/local/include"
+          LIB_FLAGS="-static -L/usr/local/lib64 -L/usr/local/lib"
 
           for cpp_file in src/main/cpp/*.cpp; do
             obj_file="build/obj/$(basename ${cpp_file%.cpp}).o"
-            "$CXX" -std=c++20 -O3 -Wall -Wextra -DCPPHTTPLIB_OPENSSL_SUPPORT \
+            g++ -std=c++20 -O3 -Wall -Wextra -DCPPHTTPLIB_OPENSSL_SUPPORT \
               $INC_FLAGS \
               -c "$cpp_file" -o "$obj_file"
           done
 
-          "$CXX" build/obj/*.o -o build/bin/gpt-linux-arm64 \
+          g++ build/obj/*.o -o build/bin/gpt-linux-arm64 \
             -static -static-libgcc -static-libstdc++ \
             $LIB_FLAGS \
-            -lcurl -lpsl -lidn2 -lunistring -lssl -lcrypto -lsqlite3 -lnghttp2 -lzstd -lz -lresolv -lpthread -ldl
+            -lcurl -lpsl -lidn2 -lunistring \
+            -lssl -lcrypto -lsqlite3 -lnghttp2 -lzstd -lz \
+            -lresolv -lpthread -ldl
 
-          "$STRIP" build/bin/gpt-arm64 || true
+          strip build/bin/gpt-linux-arm64 || true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -653,9 +686,9 @@ jobs:
           set -e
           mkdir -p deps && cd deps
           # zstd
-          wget -q https://github.com/facebook/zstd/releases/download/v1.5.5/zstd-1.5.5.tar.gz
-          tar -zxf zstd-1.5.5.tar.gz
-          cd zstd-1.5.5
+          wget -q https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+          tar -zxf zstd-1.5.7.tar.gz
+          cd zstd-1.5.7
           make -j$(nproc) CC=$CC CXX=$CXX
           sudo make PREFIX=$PREFIX install
           cd ..
@@ -666,11 +699,12 @@ jobs:
           CC=$CC ./configure --static --prefix=$PREFIX
           make -j$(nproc); sudo make install
           cd ..
-          # OpenSSL
-          wget -q https://www.openssl.org/source/openssl-1.1.1w.tar.gz
-          tar -zxf openssl-1.1.1w.tar.gz
-          cd openssl-1.1.1w
-          CC=$CC ./Configure mingw64 no-shared --prefix=$PREFIX
+          # OpenSSL (>= 3.0.0 required by cpp-httplib when CPPHTTPLIB_OPENSSL_SUPPORT is enabled)
+          OPENSSL_VER=3.5.3
+          wget -q https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VER}/openssl-${OPENSSL_VER}.tar.gz
+          tar -zxf openssl-${OPENSSL_VER}.tar.gz
+          cd openssl-${OPENSSL_VER}
+          CC=$CC ./Configure mingw64 no-shared no-tests --prefix=$PREFIX --openssldir=$PREFIX/ssl
           make -j$(nproc); sudo make install_sw
           cd ..
           # SQLite3

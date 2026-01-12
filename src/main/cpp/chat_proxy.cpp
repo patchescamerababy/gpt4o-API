@@ -1,4 +1,3 @@
-#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "chat_proxy.h"
 #include "utils.h"
 #include <nlohmann/json.hpp>
@@ -81,18 +80,22 @@ void ChatProxy::refresh_token() {
 
 void ChatProxy::ensure_valid_token() {
     std::lock_guard<std::mutex> lock(token_mutex_);
-    int64_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+
+    std::time_t now_t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    int64_t now = static_cast<int64_t>(now_t);
+
     if (token_.empty() || now >= token_exp_) {
         refresh_token();
     }
+
     int remaining = static_cast<int>(token_exp_ - now);
-    std::time_t exp_t = static_cast<time_t>(token_exp_);
+    std::time_t exp_t = static_cast<std::time_t>(token_exp_);
+
     char expbuf[32], nowbuf[32];
     std::strftime(expbuf, sizeof(expbuf), "%Y/%m/%d %H:%M:%S", std::localtime(&exp_t));
-    std::strftime(nowbuf, sizeof(nowbuf), "%Y/%m/%d %H:%M:%S", std::localtime(&now));
+    std::strftime(nowbuf, sizeof(nowbuf), "%Y/%m/%d %H:%M:%S", std::localtime(&now_t));
     std::cout << "\n  Current  time: " << nowbuf << "\nExpiration time: " << expbuf;
-    std::cout << "\nRemaining: " 
-              << (remaining/60) << " minutes " << (remaining%60) << " seconds" << std::endl;
+    std::cout << "\nRemaining: " << (remaining / 60) << " minutes " << (remaining % 60) << " seconds" << std::endl;
 }
 
 void ChatProxy::handle(const httplib::Request& req, httplib::Response& res) {
