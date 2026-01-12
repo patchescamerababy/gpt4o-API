@@ -670,16 +670,46 @@ jobs:
           set -e
           repo="$PWD/${REPO_DEPS_DIR}"
 
-          # 说明：该 job 最终链接必须能找到 -lssl/-lcrypto
-          # OpenSSL 有时会把库装到 lib64/，所以这里同时检查 lib/ 与 lib64/
+          echo "Checking repo deps at: $repo"
+          echo "--- include dir ---"
+          ls -la "$repo/include" 2>/dev/null || true
+          echo "--- lib dir ---"
+          ls -la "$repo/lib" 2>/dev/null || true
+          echo "--- lib64 dir ---"
+          ls -la "$repo/lib64" 2>/dev/null || true
+
+          # 要求该 job 最终链接所需的库都存在，否则宁愿重新编译 deps，避免最后链接才失败。
+          # 注：OpenSSL 可能落在 lib64/，其余库默认在 lib/
+          need_in_lib=(
+            "libcurl.a"
+            "libsqlite3.a"
+            "libnghttp2.a"
+            "libzstd.a"
+            "libz.a"
+          )
+
+          missing=()
+
+          if [ ! -d "$repo/include" ]; then
+            missing+=("include/")
+          fi
+
+          for f in "${need_in_lib[@]}"; do
+            if [ ! -f "$repo/lib/$f" ]; then
+              missing+=("lib/$f")
+            fi
+          done
+
           ssl_ok=false
           if [ -f "$repo/lib/libssl.a" ] && [ -f "$repo/lib/libcrypto.a" ]; then
             ssl_ok=true
           elif [ -f "$repo/lib64/libssl.a" ] && [ -f "$repo/lib64/libcrypto.a" ]; then
             ssl_ok=true
+          else
+            missing+=("libssl.a/libcrypto.a (in lib/ or lib64/)")
           fi
 
-          if [ -d "$repo/include" ] && [ -f "$repo/lib/libcurl.a" ] && [ "$ssl_ok" = "true" ]; then
+          if [ "${#missing[@]}" -eq 0 ] && [ "$ssl_ok" = "true" ]; then
             echo "Using cached deps from repo: $repo"
             sudo mkdir -p "$PREFIX/include" "$PREFIX/lib" "$PREFIX/lib64"
             sudo cp -R "$repo/include/." "$PREFIX/include/" || true
@@ -689,7 +719,8 @@ jobs:
             fi
             echo "use_cache=true" >> $GITHUB_OUTPUT
           else
-            echo "No cached deps found; will build deps."
+            echo "Repo deps cache MISS. Missing:"
+            printf ' - %s\n' "${missing[@]}"
             echo "use_cache=false" >> $GITHUB_OUTPUT
           fi
 
