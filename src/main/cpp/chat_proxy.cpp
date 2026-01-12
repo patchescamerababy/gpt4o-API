@@ -151,6 +151,7 @@ std::string html = R"(
             // 处理图片下载
             std::vector<std::future<void>> image_tasks;
             const long OVERALL_DEADLINE_MS = 120000L;
+            const long overall_deadline_ms = OVERALL_DEADLINE_MS; // 用于 lambda capture，避免 clang -Wunused-lambda-capture 告警
             auto start_time = std::chrono::steady_clock::now();
             
             for (auto& message : messages) {
@@ -161,17 +162,17 @@ std::string html = R"(
                             if (content_item.contains("image_url") && content_item["image_url"].contains("url")) {
                                 std::string image_url = content_item["image_url"]["url"];
                                 if (!image_url.empty() && image_url.find("data:image/") != 0) {
-                                    auto task = std::async(std::launch::async, [&content_item, image_url, start_time, OVERALL_DEADLINE_MS]() {
+                                    auto task = std::async(std::launch::async, [&content_item, image_url, start_time, overall_deadline_ms]() {
                                         try {
                                             std::string data_uri = Utils::download_to_data_uri_with_retry(
                                                 image_url,
                                                 8,
                                                 200L,
                                                 5000L,
-                                                [start_time, OVERALL_DEADLINE_MS]() {
+                                                [start_time, overall_deadline_ms]() {
                                                     auto now = std::chrono::steady_clock::now();
                                                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time);
-                                                    return elapsed.count() < OVERALL_DEADLINE_MS;
+                                                    return elapsed.count() < overall_deadline_ms;
                                                 }
                                             );
                                             content_item["image_url"]["url"] = data_uri;
@@ -458,7 +459,7 @@ void ChatProxy::handle_stream_response(const httplib::Request& req, httplib::Res
 
         // Provider: called by httplib to stream content. It should block and push SSE chunks via sink.write(...)
         res.set_chunked_content_provider("text/event-stream; charset=utf-8",
-            [=, &res, &stream_status_to_set](size_t /*offset*/, httplib::DataSink &sink) -> bool {
+            [=, this, &res, &stream_status_to_set](size_t /*offset*/, httplib::DataSink &sink) -> bool {
                 try {
                     // 1) Send initial SSE chunk
                     std::string initial = build_initial_sse_chunk(convo_id, system_fingerprint);
@@ -484,7 +485,7 @@ void ChatProxy::handle_stream_response(const httplib::Request& req, httplib::Res
                     std::shared_ptr<std::string> error_buffer = std::make_shared<std::string>();
 
                     // content_receiver will be called as upstream body data arrives
-                    stream_req.content_receiver = [=,&sink,&error_buffer](const char* data, size_t data_length, size_t /*offset*/, size_t /*total_length*/) -> bool {
+                    stream_req.content_receiver = [=, this, &sink, &error_buffer](const char* data, size_t data_length, size_t /*offset*/, size_t /*total_length*/) -> bool {
                         if (data_length == 0) return true;
                         std::string delta(data, data_length);
                         std::cout << delta << std::flush;

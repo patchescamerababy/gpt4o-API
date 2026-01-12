@@ -2,7 +2,6 @@
  * main.cpp
  ***********************/
 
-#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -20,7 +19,9 @@
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
-    #pragma comment(lib, "ws2_32.lib")
+    #if defined(_MSC_VER)
+        #pragma comment(lib, "ws2_32.lib")
+    #endif
 #else
     #include <sys/socket.h>
     #include <netinet/in.h>

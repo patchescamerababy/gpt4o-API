@@ -1,4 +1,3 @@
-#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "utils.h"
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
